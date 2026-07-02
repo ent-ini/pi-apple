@@ -44,6 +44,14 @@ let package = Package(
             path: "Sources/ApplePi",
             resources: [
                 .copy("Resources")
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/ApplePi/Info.plist"
+                ])
             ]
         ),
         .executableTarget(
