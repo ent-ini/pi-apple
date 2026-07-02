@@ -136,19 +136,13 @@ struct MessageListView: View {
 
     private func refreshDisplayedRowsCache() {
         let allEvents = session.events
-        let visibleEvents = allEvents.filter(\.isVisibleInTranscript)
-        let orderedVisibleEvents = visibleEvents
-            .enumerated()
-            .sorted { lhs, rhs in
-                let lhsLine = lhs.element.lineIndex
-                let rhsLine = rhs.element.lineIndex
-                if lhsLine != rhsLine {
-                    return lhsLine < rhsLine
-                }
-                return lhs.offset < rhs.offset
-            }
-            .map(\.element)
-        displayedRowsCache = DisplayedSessionRow.groupingToolResults(in: orderedVisibleEvents)
+        // `ChatSession` is the single source of transcript order: persisted
+        // rows are merged by JSONL/source order, while live/optimistic rows are
+        // append-only in the order the user/app observed them. Do not sort here:
+        // a view-level sort can move retained transient rows around after
+        // abort/steer/follow-up transitions and make already-visible messages
+        // appear to jump.
+        displayedRowsCache = DisplayedSessionRow.groupingToolResults(in: allEvents.filter(\.isVisibleInTranscript))
         fileReferenceBaseDirectoryCache = resolveFileReferenceBaseDirectory(from: allEvents)
     }
 

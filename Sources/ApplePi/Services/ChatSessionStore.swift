@@ -57,6 +57,9 @@ final class ChatSession: ObservableObject, Identifiable {
     private var transientUserEvent: SessionEvent?
     private var transientAssistantEvent: SessionEvent?
     private var transientStreamEvents: [SessionEvent] = []
+    private var displayOrderByEventID: [String: Double] = [:]
+    private var nextAppendDisplayOrder: Double = 0
+    private var nextPrependDisplayOrder: Double = -1
     private var didAbortCurrentSend = false
 
     var lastPersistedLineIndex: Int {
@@ -421,10 +424,12 @@ final class ChatSession: ObservableObject, Identifiable {
             freshEvents.append(event)
         }
         if !freshEvents.isEmpty {
+            inheritDisplayOrdersForPersistedEvents(freshEvents)
+            assignMissingDisplayOrders(to: freshEvents)
             // Live SSE / polling pages can occasionally arrive slightly out of
             // order around steer/queued-input boundaries. Insert by JSONL line
-            // instead of blindly appending after the last known line so a late
-            // user/assistant row cannot be dropped or shown after newer rows.
+            // for pagination/source bookkeeping, while display order remains
+            // stable by first appearance so visible rows do not jump.
             persistedEvents = mergePersistedEvents(persistedEvents, withFreshPage: freshEvents)
             reconcileTransientEvents(with: persistedEvents)
             rebuildEvents()
@@ -515,7 +520,10 @@ final class ChatSession: ObservableObject, Identifiable {
                 statusMessage = "Session is not backed by a file yet."
                 finishLoad(completionGeneration: completionGeneration)
             case .loaded(let page, let modificationDate):
-                persistedEvents = reloadedPersistedEvents(from: page)
+                let reloadedEvents = reloadedPersistedEvents(from: page)
+                inheritDisplayOrdersForPersistedEvents(reloadedEvents)
+                assignMissingDisplayOrders(to: reloadedEvents)
+                persistedEvents = reloadedEvents
                 hasEarlierHistory = hasEarlierHistoryAvailable(afterReloading: page)
                 updateTitleFromSessionMetadata(in: page.events)
                 reconcileTransientEvents(with: persistedEvents)
@@ -566,7 +574,19 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private func rebuildEvents() {
-        events = persistedEvents + visibleTransientEvents
+        let visibleEvents = persistedEvents + visibleTransientEvents
+        assignMissingDisplayOrders(to: visibleEvents)
+        events = visibleEvents.sorted { lhs, rhs in
+            let lhsOrder = displayOrderByEventID[lhs.id] ?? Double.greatestFiniteMagnitude
+            let rhsOrder = displayOrderByEventID[rhs.id] ?? Double.greatestFiniteMagnitude
+            if lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            if lhs.lineIndex != rhs.lineIndex {
+                return lhs.lineIndex < rhs.lineIndex
+            }
+            return lhs.id < rhs.id
+        }
         streamRevision &+= 1
     }
 
@@ -621,6 +641,66 @@ final class ChatSession: ObservableObject, Identifiable {
         return firstLine > 0
     }
 
+    private func assignMissingDisplayOrders(to events: [SessionEvent]) {
+        for event in events where displayOrderByEventID[event.id] == nil {
+            displayOrderByEventID[event.id] = nextAppendDisplayOrder
+            nextAppendDisplayOrder += 1
+        }
+    }
+
+    private func assignPrependedDisplayOrders(to events: [SessionEvent]) {
+        for event in events.reversed() where displayOrderByEventID[event.id] == nil {
+            displayOrderByEventID[event.id] = nextPrependDisplayOrder
+            nextPrependDisplayOrder -= 1
+        }
+    }
+
+    private func inheritDisplayOrdersForPersistedEvents(_ persisted: [SessionEvent]) {
+        let transientCandidates = retainedTransientEvents
+            + [transientUserEvent].compactMap { $0 }
+            + [transientAssistantEvent].compactMap { $0 }
+            + transientStreamEvents
+        guard !transientCandidates.isEmpty else { return }
+
+        var usedTransientIDs = Set<String>()
+        for persistedEvent in persisted where displayOrderByEventID[persistedEvent.id] == nil {
+            guard let transientEvent = transientCandidates.first(where: { candidate in
+                guard !usedTransientIDs.contains(candidate.id) else { return false }
+                return transientEvent(candidate, matchesPersistedReplacement: persistedEvent)
+            }),
+                  let inheritedOrder = displayOrderByEventID[transientEvent.id] else {
+                continue
+            }
+            displayOrderByEventID[persistedEvent.id] = inheritedOrder
+            usedTransientIDs.insert(transientEvent.id)
+        }
+    }
+
+    private func transientEvent(_ transient: SessionEvent, matchesPersistedReplacement persisted: SessionEvent) -> Bool {
+        switch (transient, persisted) {
+        case (.message(let transientMessage, _), .message(let persistedMessage, _)):
+            guard transientMessage.role == persistedMessage.role else { return false }
+            if transientMessage.id == persistedMessage.id { return true }
+            let transientSignature = messageSignature(for: transientMessage)
+            let persistedSignature = messageSignature(for: persistedMessage)
+            if !transientSignature.isEmpty, transientSignature == persistedSignature {
+                return true
+            }
+            return transientMessage.content == persistedMessage.content
+        case (.toolCall(let transientCall, _), .toolCall(let persistedCall, _)):
+            return transientCall.id == persistedCall.id
+        case (.toolResult(let transientResult, _), .toolResult(let persistedResult, _)):
+            return transientResult.id == persistedResult.id
+                || (!transientResult.callId.isEmpty && transientResult.callId == persistedResult.callId)
+        case (.other(let transientType, _), .other(let persistedType, _)):
+            return transientType == persistedType
+        case (.meta(let transientMeta, _), .meta(let persistedMeta, _)):
+            return transientMeta.id == persistedMeta.id
+        default:
+            return false
+        }
+    }
+
     private var visibleTransientEvents: [SessionEvent] {
         (retainedTransientEvents + [transientUserEvent].compactMap { $0 } + transientStreamEvents)
             .filter { shouldDisplayTransientEvent($0) }
@@ -663,6 +743,7 @@ final class ChatSession: ObservableObject, Identifiable {
             return
         }
         pendingHistoryAnchorEventID = anchorEventID
+        assignPrependedDisplayOrders(to: filtered)
         persistedEvents = mergePersistedEvents(persistedEvents, withFreshPage: filtered)
         hasEarlierHistory = page.hasMoreBefore
         reconcileTransientEvents(with: persistedEvents)

@@ -230,6 +230,73 @@ private actor SessionEventsPageBox {
 }
 
 @MainActor
+@Test func chatSessionKeepsAbortAndQueuedInputInObservedOrder() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.beginSending(prompt: "first")
+    session.applyStreamingEvents(
+        [
+            .message(
+                Message(id: "assistant-1", role: .assistant, content: [.text("partial")], model: nil, timestamp: nil, parentId: nil),
+                lineIndex: 0
+            )
+        ],
+        isFinal: false
+    )
+
+    session.abortSend()
+    session.appendSteeringPrompt("after abort")
+
+    let visibleMessages = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event else { return nil }
+        let text = message.content.compactMap { block -> String? in
+            if case .text(let text) = block { return text }
+            return nil
+        }.joined(separator: " ")
+        return "\(message.role.rawValue):\(text)"
+    }
+
+    #expect(visibleMessages == [
+        "user:first",
+        "assistant:partial",
+        "user:/abort",
+        "user:after abort"
+    ])
+}
+
+@MainActor
+@Test func chatSessionAppendsNewFollowUpAfterRetainedTransientTranscript() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.beginSending(prompt: "first")
+    session.applyStreamingEvents(
+        [
+            .message(
+                Message(id: "assistant-1", role: .assistant, content: [.text("partial")], model: nil, timestamp: nil, parentId: nil),
+                lineIndex: 0
+            )
+        ],
+        isFinal: false
+    )
+
+    session.finishSendingWithError("transport closed")
+    session.beginSending(prompt: "second")
+
+    let visibleMessages = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event else { return nil }
+        let text = message.content.compactMap { block -> String? in
+            if case .text(let text) = block { return text }
+            return nil
+        }.joined(separator: " ")
+        return "\(message.role.rawValue):\(text)"
+    }
+
+    #expect(visibleMessages == [
+        "user:first",
+        "assistant:partial",
+        "user:second"
+    ])
+}
+
+@MainActor
 @Test func chatSessionKeepsStreamEventsInWireOrder() {
     let session = ChatSession(key: "test", title: "Test")
     session.beginSending(prompt: "hello")
@@ -269,7 +336,7 @@ private actor SessionEventsPageBox {
 }
 
 @MainActor
-@Test func chatSessionMergesLatePersistedEventsBySourceLine() {
+@Test func chatSessionAppendsLatePersistedEventsWithoutMovingVisibleRows() {
     let session = ChatSession(key: "test", title: "Test")
     session.appendPersistedEvents([
         .message(
@@ -293,8 +360,53 @@ private actor SessionEventsPageBox {
         guard case .message(let message, _) = event else { return nil }
         return message.id
     }
-    #expect(orderedIDs == ["m1", "m2", "m3"])
+    #expect(orderedIDs == ["m1", "m3", "m2"])
+    // Source-line bookkeeping still observes the real latest persisted row for
+    // pagination/catch-up, even though display order remains append-stable.
     #expect(session.lastPersistedLineIndex == 3)
+}
+
+@MainActor
+@Test func chatSessionPersistedAbortReplacementPreservesFirstSeenOrder() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.beginSending(prompt: "first")
+    session.applyStreamingEvents([
+        .message(
+            Message(id: "partial", role: .assistant, content: [.text("working")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 0
+        )
+    ], isFinal: false)
+    session.abortSend()
+    session.appendSteeringPrompt("after abort")
+
+    session.appendPersistedEvents([
+        .message(
+            Message(id: "persisted-first", role: .user, content: [.text("first")], model: nil, timestamp: Date(), parentId: nil),
+            lineIndex: 10
+        ),
+        .message(
+            Message(id: "persisted-partial", role: .assistant, content: [.text("working")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 11
+        ),
+        // Simulate a catch-up/reload where the follow-up has an earlier JSONL
+        // line than the abort acknowledgement. The UI must keep the order the
+        // user saw: /abort first, then the next prompt.
+        .message(
+            Message(id: "persisted-after", role: .user, content: [.text("after abort")], model: nil, timestamp: Date(), parentId: nil),
+            lineIndex: 12
+        ),
+        .message(
+            Message(id: "persisted-abort", role: .user, content: [.text("/abort")], model: nil, timestamp: Date(), parentId: nil),
+            lineIndex: 13
+        )
+    ])
+
+    let userTexts = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event, message.role == .user else { return nil }
+        guard case .text(let text) = message.content.first else { return nil }
+        return text
+    }
+    #expect(userTexts == ["first", "/abort", "after abort"])
 }
 
 @MainActor
