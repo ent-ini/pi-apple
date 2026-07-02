@@ -2436,15 +2436,17 @@ func (s *server) runPiRPCCommandsInContext(cwd string, sessionFile string, comma
 		stderrDone <- strings.TrimSpace(string(data))
 	}()
 
+	expectedResponses := expectedRPCResponseTypes(commands)
+	stdinClosed := false
 	for _, command := range commands {
 		if err := writeRPCCommand(stdin, command); err != nil {
 			_ = stdin.Close()
+			stdinClosed = true
 			_ = cmd.Wait()
 			<-stderrDone
 			return nil, err
 		}
 	}
-	_ = stdin.Close()
 
 	responses := make(map[string]rpcResponseEnvelope, len(commands))
 	reader := bufio.NewScanner(stdout)
@@ -2461,6 +2463,19 @@ func (s *server) runPiRPCCommandsInContext(cwd string, sessionFile string, comma
 		if envelope.Command != "" {
 			responses[envelope.Command] = envelope
 		}
+		if !stdinClosed && allRPCResponsesReceived(responses, expectedResponses) {
+			// Keep stdin open while long-running synchronous RPC commands (notably
+			// compact) are executing. Closing stdin immediately races RPC-mode
+			// shutdown against the command and aborts compaction with
+			// "Compaction cancelled". Once all command responses are observed,
+			// close stdin to let the one-shot RPC process exit cleanly, then keep
+			// draining stdout until EOF so cmd.Wait cannot block on a full pipe.
+			_ = stdin.Close()
+			stdinClosed = true
+		}
+	}
+	if !stdinClosed {
+		_ = stdin.Close()
 	}
 	if err := reader.Err(); err != nil {
 		_ = cmd.Wait()
@@ -2528,6 +2543,38 @@ func (s *server) invalidateCatalogSnapshot() {
 	s.snapshot = catalogResponse{}
 	s.sessionsByID = map[string]sessionRecord{}
 	s.mu.Unlock()
+}
+
+func expectedRPCResponseTypes(commands []any) []string {
+	expected := make([]string, 0, len(commands))
+	seen := make(map[string]bool, len(commands))
+	for _, command := range commands {
+		data, err := json.Marshal(command)
+		if err != nil {
+			continue
+		}
+		var header struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(data, &header); err != nil || header.Type == "" || seen[header.Type] {
+			continue
+		}
+		seen[header.Type] = true
+		expected = append(expected, header.Type)
+	}
+	return expected
+}
+
+func allRPCResponsesReceived(responses map[string]rpcResponseEnvelope, expected []string) bool {
+	if len(expected) == 0 {
+		return false
+	}
+	for _, commandType := range expected {
+		if _, ok := responses[commandType]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func writeRPCCommand(w io.Writer, payload any) error {
