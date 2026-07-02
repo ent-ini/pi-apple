@@ -414,9 +414,18 @@ final class ChatSession: ObservableObject, Identifiable {
     @discardableResult
     func appendPersistedPage(_ page: SessionEventsPage) -> Bool {
         let didUpdateTitle = updateTitleFromSessionMetadata(in: page.events)
-        let filtered = page.events.filter { $0.lineIndex > lastPersistedLineIndex }
-        if !filtered.isEmpty {
-            persistedEvents.append(contentsOf: filtered)
+        var seenIDs = Set(persistedEvents.map(\.id))
+        var freshEvents: [SessionEvent] = []
+        freshEvents.reserveCapacity(page.events.count)
+        for event in page.events where seenIDs.insert(event.id).inserted {
+            freshEvents.append(event)
+        }
+        if !freshEvents.isEmpty {
+            // Live SSE / polling pages can occasionally arrive slightly out of
+            // order around steer/queued-input boundaries. Insert by JSONL line
+            // instead of blindly appending after the last known line so a late
+            // user/assistant row cannot be dropped or shown after newer rows.
+            persistedEvents = mergePersistedEvents(persistedEvents, withFreshPage: freshEvents)
             reconcileTransientEvents(with: persistedEvents)
             rebuildEvents()
             statusMessage = "\(persistedEvents.count) events"
@@ -778,19 +787,32 @@ final class ChatSession: ObservableObject, Identifiable {
             }
 
             let persistedSignature = messageSignature(for: persistedMessage)
-            if !transientSignature.isEmpty, transientSignature == persistedSignature {
+            if !transientSignature.isEmpty,
+               transientSignature == persistedSignature,
+               messageTimestampsAreClose(transientMessage, persistedMessage) {
                 return true
             }
 
             guard persistedMessage.content == transientMessage.content else {
                 return false
             }
-            if let transientTimestamp = transientMessage.timestamp,
-               let persistedTimestamp = persistedMessage.timestamp {
-                return abs(persistedTimestamp.timeIntervalSince(transientTimestamp)) < 30
+            if messageTimestampsAreClose(transientMessage, persistedMessage) {
+                return true
             }
-            return persistedMessage.parentId == transientMessage.parentId
+            guard let transientParent = transientMessage.parentId?.nilIfBlank,
+                  let persistedParent = persistedMessage.parentId?.nilIfBlank else {
+                return false
+            }
+            return transientParent == persistedParent
         }
+    }
+
+    private func messageTimestampsAreClose(_ lhs: Message, _ rhs: Message) -> Bool {
+        guard let lhsTimestamp = lhs.timestamp,
+              let rhsTimestamp = rhs.timestamp else {
+            return false
+        }
+        return abs(rhsTimestamp.timeIntervalSince(lhsTimestamp)) < 30
     }
 
     private func messageSignature(for message: Message) -> String {

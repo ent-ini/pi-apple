@@ -1995,11 +1995,6 @@ final class PiAppState: ObservableObject {
             scheduleSelectedSessionCatchUp(after: .milliseconds(250))
             return
         }
-        if let lastLine = page.lastLine,
-           lastLine <= session.lastPersistedLineIndex {
-            return
-        }
-
         if pendingSelectedSessionStreamTabID != session.id || pendingSelectedSessionStreamSessionID != sessionID {
             cancelSelectedSessionStreamFlush(discardPending: true)
             pendingSelectedSessionStreamTabID = session.id
@@ -2046,12 +2041,10 @@ final class PiAppState: ObservableObject {
             return
         }
 
-        let after = session.lastPersistedLineIndex
-        let freshEvents = page.events.filter { $0.lineIndex > after }
-        guard !freshEvents.isEmpty else { return }
+        guard !page.events.isEmpty else { return }
 
         let previousTitle = session.title
-        session.appendPersistedPage(SessionEventsPage.fromEvents(freshEvents))
+        session.appendPersistedPage(page)
         syncSidebarTitleIfNeeded(for: session, previousTitle: previousTitle)
     }
 

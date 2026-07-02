@@ -791,6 +791,28 @@ private func isolatedDefaults() -> UserDefaults {
     }())
 }
 
+@Test func transcriptVisibilityHidesCompactionBookkeepingEvents() {
+    let events = SessionEventParser.parse(lines: [
+        #"{"type":"message","message":{"role":"user","content":"before"}}"#,
+        #"{"type":"compaction","summary":"large summary"}"#,
+        #"{"type":"compaction_start","reason":"manual"}"#,
+        #"{"type":"compaction_end","reason":"manual"}"#,
+        #"{"type":"message","message":{"role":"assistant","content":"after"}}"#
+    ])
+
+    let visible = events.filter(\.isVisibleInTranscript)
+
+    #expect(visible.count == 2)
+    #expect({
+        if case .message(let message, _) = visible[0] { return message.content == [.text("before")] }
+        return false
+    }())
+    #expect({
+        if case .message(let message, _) = visible[1] { return message.content == [.text("after")] }
+        return false
+    }())
+}
+
 @Test func transcriptVisibilityHidesThinkingOnlyAssistantFragments() {
     let events = SessionEventParser.parse(lines: [
         #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"toolCall","id":"call-1","name":"read","arguments":{}}]}}"#,

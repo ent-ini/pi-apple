@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 import ApplePiCore
 import ApplePiRemote
 
@@ -19,6 +22,7 @@ struct MessageListView: View {
     @State private var ensureVisibleWorkItems: [DispatchWorkItem] = []
     @State private var bottomScrollGeneration = 0
     @State private var ensureVisibleGeneration = 0
+    @State private var recentUserScrollUntil: Date?
     @State private var displayedRowsCache: [DisplayedSessionRow] = []
     @State private var fileReferenceBaseDirectoryCache: String?
 
@@ -56,6 +60,11 @@ struct MessageListView: View {
                     .frame(minHeight: proxy.size.height, alignment: .top)
                 }
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
+                .background(
+                    ChatScrollIntentObserver {
+                        noteUserScrollIntent()
+                    }
+                )
                 .environment(\.chatEnsureVisible, ChatEnsureVisibleAction { targetID in
                     ensureVisible(targetID, using: scrollProxy, viewportHeight: proxy.size.height)
                 })
@@ -119,6 +128,8 @@ struct MessageListView: View {
     private static let stickyBreakawayDistance: CGFloat = 260
     private static let bottomReachedEpsilon: CGFloat = 3
     private static let stickyAutoScrollDuration: TimeInterval = 30
+    private static let recentUserScrollDuration: TimeInterval = 0.9
+    private static let userScrollBreakawayDistance: CGFloat = 12
     private static let historyPageSize = 40
     private static let scrollSettleDelays: [TimeInterval] = [0.0, 0.08, 0.22]
     private static let ensureVisibleSettleDelays: [TimeInterval] = [0.04, 0.16, 0.34, 0.65]
@@ -205,6 +216,12 @@ struct MessageListView: View {
         }
         let distanceToBottom = bottomMaxY - viewportHeight
         if isStickyAutoScrollActive {
+            if isRecentUserScrollActive, distanceToBottom > Self.userScrollBreakawayDistance {
+                stickyAutoScrollUntil = nil
+                isAnchoredToBottom = false
+                cancelBottomScrollWorkItems()
+                return
+            }
             if distanceToBottom > Self.stickyBreakawayDistance {
                 stickyAutoScrollUntil = nil
                 isAnchoredToBottom = false
@@ -236,6 +253,15 @@ struct MessageListView: View {
         guard isAnchoredToBottom || isStickyAutoScrollActive else { return }
         startStickyAutoScroll()
         scrollToBottomSettled(using: scrollProxy, animated: false, completesInitialPlacement: false)
+    }
+
+    private var isRecentUserScrollActive: Bool {
+        guard let recentUserScrollUntil else { return false }
+        return recentUserScrollUntil > Date()
+    }
+
+    private func noteUserScrollIntent() {
+        recentUserScrollUntil = Date().addingTimeInterval(Self.recentUserScrollDuration)
     }
 
     private func startStickyAutoScroll() {
@@ -327,6 +353,73 @@ private struct BottomAnchorMaxYPreferenceKey: PreferenceKey {
         value = nextValue()
     }
 }
+
+#if os(macOS)
+private struct ChatScrollIntentObserver: NSViewRepresentable {
+    let onUserScroll: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ChatScrollIntentView()
+        view.onUserScroll = onUserScroll
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? ChatScrollIntentView)?.onUserScroll = onUserScroll
+    }
+}
+
+private final class ChatScrollIntentView: NSView {
+    var onUserScroll: (() -> Void)?
+    private var monitor: Any?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            removeMonitor()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        resetMonitor()
+    }
+
+    private func resetMonitor() {
+        removeMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, self.eventIsInsideView(event) else { return event }
+            self.onUserScroll?()
+            return event
+        }
+    }
+
+    private func eventIsInsideView(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        return bounds.contains(point)
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    deinit {
+        MainActor.assumeIsolated {
+            removeMonitor()
+        }
+    }
+}
+#else
+private struct ChatScrollIntentObserver: View {
+    let onUserScroll: () -> Void
+    var body: some View { Color.clear }
+}
+#endif
 
 struct ChatEnsureVisibleAction: @unchecked Sendable {
     let action: @MainActor (String) -> Void

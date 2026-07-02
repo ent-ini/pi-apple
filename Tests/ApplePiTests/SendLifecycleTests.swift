@@ -162,6 +162,37 @@ private actor SessionEventsPageBox {
 }
 
 @MainActor
+@Test func chatSessionDoesNotHideRepeatedPromptFromOlderPersistedTurn() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.appendPersistedEvents([
+        .message(
+            Message(
+                id: "old-user",
+                role: .user,
+                content: [.text("same prompt")],
+                model: nil,
+                timestamp: Date(timeIntervalSinceNow: -120),
+                parentId: nil
+            ),
+            lineIndex: 0
+        ),
+        .message(
+            Message(id: "old-assistant", role: .assistant, content: [.text("old answer")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 1
+        )
+    ])
+
+    session.beginSending(prompt: "same prompt")
+
+    let userMessages = session.events.compactMap { event -> Message? in
+        guard case .message(let message, _) = event, message.role == .user else { return nil }
+        return message
+    }
+    #expect(userMessages.count == 2)
+    #expect(userMessages.map(\.id).contains("old-user"))
+}
+
+@MainActor
 @Test func chatSessionDoesNotExposeSyntheticAssistantPlaceholderBeforeStreamEventsArrive() {
     let session = ChatSession(key: "test", title: "Test")
     session.beginSending(prompt: "hello")
@@ -235,6 +266,35 @@ private actor SessionEventsPageBox {
         "toolResult:call-1",
         "message:assistant:assistant-2"
     ])
+}
+
+@MainActor
+@Test func chatSessionMergesLatePersistedEventsBySourceLine() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.appendPersistedEvents([
+        .message(
+            Message(id: "m1", role: .assistant, content: [.text("one")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 1
+        ),
+        .message(
+            Message(id: "m3", role: .assistant, content: [.text("three")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 3
+        )
+    ])
+
+    session.appendPersistedEvents([
+        .message(
+            Message(id: "m2", role: .user, content: [.text("two")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 2
+        )
+    ])
+
+    let orderedIDs = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event else { return nil }
+        return message.id
+    }
+    #expect(orderedIDs == ["m1", "m2", "m3"])
+    #expect(session.lastPersistedLineIndex == 3)
 }
 
 @MainActor
