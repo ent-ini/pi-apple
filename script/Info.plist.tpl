@@ -47,11 +47,19 @@
         <true/>
         <key>NSExceptionDomains</key>
         <dict>
-            <key>100.100.11.4</key>
+            <key>100.100.11.0</key>
             <dict>
                 <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>
-                <key>NSIncludesSubdomains</key>
+            </dict>
+            <key>homelab</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+            <key>homelab.ts.net</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>
             </dict>
             <key>127.0.0.1</key>
@@ -62,8 +70,6 @@
             <key>localhost</key>
             <dict>
                 <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSIncludesSubdomains</key>
                 <true/>
             </dict>
         </dict>
