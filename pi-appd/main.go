@@ -2228,11 +2228,17 @@ func loadFastSessionRuntime(record sessionRecord) (sessionRuntimeResponse, error
 	if runtime.Tokens.Total == 0 {
 		runtime.Tokens.Total = runtime.Tokens.Input + runtime.Tokens.Output + runtime.Tokens.CacheRead + runtime.Tokens.CacheWrite
 	}
-	if latestContextTokens != nil {
-		contextUsage := &runtimeContextUsage{Tokens: latestContextTokens}
+	if latestContextTokens != nil || (runtime.Model != nil && runtime.Model.ContextWindow > 0) {
+		contextTokens := 0
+		if latestContextTokens != nil {
+			contextTokens = *latestContextTokens
+		} else if runtime.Tokens.Total > 0 {
+			contextTokens = runtime.Tokens.Total
+		}
+		contextUsage := &runtimeContextUsage{Tokens: &contextTokens}
 		if runtime.Model != nil && runtime.Model.ContextWindow > 0 {
 			contextUsage.ContextWindow = runtime.Model.ContextWindow
-			percent := float64(*latestContextTokens) / float64(runtime.Model.ContextWindow) * 100
+			percent := float64(contextTokens) / float64(runtime.Model.ContextWindow) * 100
 			contextUsage.Percent = &percent
 		}
 		runtime.ContextUsage = contextUsage

@@ -794,20 +794,51 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private func messageSignature(for message: Message) -> String {
-        message.content.compactMap { block -> String? in
+        var textParts: [String] = []
+        var thinkingParts: [String] = []
+        var imageCount = 0
+
+        for block in message.content {
             switch block {
             case .text(let text):
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
+                let trimmed = normalizedMessageText(text)
+                if !trimmed.isEmpty {
+                    textParts.append(trimmed)
+                }
             case .thinking(let text, _):
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : "[thinking]\(trimmed)"
-            case .image(let path, _):
-                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : "[image]\(trimmed)"
+                if !trimmed.isEmpty {
+                    thinkingParts.append(trimmed)
+                }
+            case .image:
+                imageCount += 1
             }
         }
-        .joined(separator: "\n")
+
+        var parts = textParts
+        parts.append(contentsOf: thinkingParts.map { "[thinking]\($0)" })
+        if imageCount > 0 {
+            // Optimistic image prompts use local staged paths and order
+            // attachments before text; persisted pi-appd rows may contain an
+            // upload marker in text plus the image block after text/base64.
+            // Match by visible text + image count rather than path/order.
+            parts.append("[images:\(imageCount)]")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private func normalizedMessageText(_ text: String) -> String {
+        text
+            // pi-appd persists image uploads as an empty <file ...></file>
+            // text marker plus a real image content block. The optimistic
+            // bubble only has the image block, so strip this transport marker
+            // before matching transient rows to persisted JSONL rows.
+            .replacingOccurrences(
+                of: #"<file\b[^>]*>\s*</file>"#,
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static let transientStreamLineIndexBase = Int.max - 1_000

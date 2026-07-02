@@ -136,12 +136,6 @@ struct ContentView: View {
                 }
                 .help(wantsUtilitySidebar ? "Hide utility panel" : "Show utility panel")
 
-                if appState.isLoadingCatalog {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(appState.appearance.accentColor)
-                        .help("Loading sessions")
-                }
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -660,6 +654,8 @@ struct SessionListView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: PiAppState
     @FocusState private var isSearchFieldFocused: Bool
+    @State private var renameTarget: PiSessionSummary?
+    @State private var renameDraftTitle = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -698,6 +694,10 @@ struct SessionListView: View {
                             isSelected: appState.isSelectedSession(session),
                             onSelect: {
                                 appState.select(.session(session.id))
+                            },
+                            onRename: { session in
+                                renameTarget = session
+                                renameDraftTitle = session.title
                             }
                         )
                     }
@@ -726,12 +726,34 @@ struct SessionListView: View {
             .scrollContentBackground(.hidden)
         }
         .background(appState.appearance.sidebarBackgroundColor(for: appState.appearance.resolvedColorScheme(current: colorScheme)))
+        .alert("Rename Session", isPresented: renameAlertBinding) {
+            TextField("Name", text: $renameDraftTitle)
+            Button("Rename") {
+                guard let renameTarget else { return }
+                appState.rename(renameTarget, to: renameDraftTitle)
+                self.renameTarget = nil
+            }
+            Button("Cancel", role: .cancel) {
+                renameTarget = nil
+            }
+        }
         .onAppear {
             applyPendingSearchFocus()
         }
         .onChange(of: appState.sessionSearchFocusRequestID) { _, _ in
             applyPendingSearchFocus()
         }
+    }
+
+    private var renameAlertBinding: Binding<Bool> {
+        Binding(
+            get: { renameTarget != nil },
+            set: { isPresented in
+                if !isPresented {
+                    renameTarget = nil
+                }
+            }
+        )
     }
 
     private func applyPendingSearchFocus() {
@@ -1117,17 +1139,18 @@ private struct SessionListRow: View {
     let session: PiSessionSummary
     let isSelected: Bool
     let onSelect: () -> Void
-    @State private var isRenaming = false
-    @State private var draftTitle = ""
+    let onRename: (PiSessionSummary) -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            content
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                onSelect()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1136,16 +1159,8 @@ private struct SessionListRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contextMenu {
             Button("Rename") {
-                draftTitle = session.title
-                isRenaming = true
+                onRename(session)
             }
-        }
-        .alert("Rename Session", isPresented: $isRenaming) {
-            TextField("Name", text: $draftTitle)
-            Button("Rename") {
-                appState.rename(session, to: draftTitle)
-            }
-            Button("Cancel", role: .cancel) {}
         }
         Divider()
             .padding(.leading, 12)

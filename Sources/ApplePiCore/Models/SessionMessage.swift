@@ -145,7 +145,9 @@ public enum SessionEvent: Identifiable, Hashable, Sendable {
             return false
         case .other(let type, _):
             return !Self.hiddenTranscriptEventTypes.contains(type)
-        case .message, .toolCall, .toolResult:
+        case .message(let message, _):
+            return message.hasVisibleTranscriptContent
+        case .toolCall, .toolResult:
             return true
         }
     }
@@ -163,6 +165,21 @@ public enum SessionEvent: Identifiable, Hashable, Sendable {
         case .toolCall(let call, _): return "toolCall:\(call.id)"
         case .toolResult(let result, _): return "toolResult:\(result.id)"
         case .other(let type, let index): return "other:\(type):\(index)"
+        }
+    }
+}
+
+private extension Message {
+    var hasVisibleTranscriptContent: Bool {
+        content.contains { block in
+            switch block {
+            case .text(let text):
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .image:
+                return true
+            case .thinking:
+                return false
+            }
         }
     }
 }

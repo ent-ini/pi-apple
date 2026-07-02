@@ -121,6 +121,47 @@ private actor SessionEventsPageBox {
 }
 
 @MainActor
+@Test func chatSessionReconcilesImagePromptWhenPersistedAttachmentPathDiffers() {
+    let session = ChatSession(key: "test", title: "Test")
+    let attachment = ChatAttachment(
+        kind: .image,
+        fileURL: URL(fileURLWithPath: "/tmp/local-staged-photo.png"),
+        displayName: "photo.png",
+        mimeType: "image/png",
+        size: 123
+    )
+
+    session.beginSending(prompt: "[source:pi-app type=text]\nчто на фото?", attachments: [attachment])
+    session.appendPersistedEvents([
+        .message(
+            Message(
+                id: "persisted-user",
+                role: .user,
+                content: [
+                    .text("<file name=\"/home/agent/.pi/agent/uploads/photo.png\"></file>\n\n[source:pi-app type=text]\nчто на фото?"),
+                    .image(path: "data:image/png;base64,abc", mime: "image/png")
+                ],
+                model: nil,
+                timestamp: Date(),
+                parentId: nil
+            ),
+            lineIndex: 0
+        ),
+        .message(
+            Message(id: "persisted-assistant", role: .assistant, content: [.text("Ответ")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 1
+        )
+    ])
+
+    let userMessages = session.events.compactMap { event -> Message? in
+        guard case .message(let message, _) = event,
+              message.role == .user else { return nil }
+        return message
+    }
+    #expect(userMessages.map(\.id) == ["persisted-user"])
+}
+
+@MainActor
 @Test func chatSessionDoesNotExposeSyntheticAssistantPlaceholderBeforeStreamEventsArrive() {
     let session = ChatSession(key: "test", title: "Test")
     session.beginSending(prompt: "hello")

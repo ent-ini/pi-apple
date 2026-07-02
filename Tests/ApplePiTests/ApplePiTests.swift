@@ -791,6 +791,25 @@ private func isolatedDefaults() -> UserDefaults {
     }())
 }
 
+@Test func transcriptVisibilityHidesThinkingOnlyAssistantFragments() {
+    let events = SessionEventParser.parse(lines: [
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"toolCall","id":"call-1","name":"read","arguments":{}}]}}"#,
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"done"},{"type":"text","text":"Готово"}]}}"#
+    ])
+
+    let visible = events.filter(\.isVisibleInTranscript)
+
+    #expect(visible.count == 2)
+    #expect({
+        if case .toolCall = visible[0] { return true }
+        return false
+    }())
+    #expect({
+        if case .message(let message, _) = visible[1] { return message.content.contains(.text("Готово")) }
+        return false
+    }())
+}
+
 @Test func sessionEventParserHandlesContentBlocksAndImages() {
     let lines = [
         #"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"see "},{"type":"image","source":{"path":"/tmp/cat.png","media_type":"image/png"}}]}}"#

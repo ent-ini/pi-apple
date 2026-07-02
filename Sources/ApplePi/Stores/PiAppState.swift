@@ -1280,7 +1280,9 @@ final class PiAppState: ObservableObject {
                 await MainActor.run {
                     guard let self, let session, self.host == remoteAPIHost else { return }
                     guard (self.thinkingLevelMutationVersionBySessionKey[sessionKey] ?? 0) == observedThinkingMutationVersion else { return }
-                    let effectiveRuntime = self.runtimeApplyingPendingThinkingLevel(runtime, sessionKey: sessionKey)
+                    let effectiveRuntime = self.runtimeApplyingKnownModelContext(
+                        self.runtimeApplyingPendingThinkingLevel(runtime, sessionKey: sessionKey)
+                    )
                     session.updateRuntimeState(effectiveRuntime)
                 }
             } catch {
@@ -1337,10 +1339,6 @@ final class PiAppState: ObservableObject {
     @discardableResult
     private func applyCachedAvailableModels(to session: ChatSession) -> Bool {
         guard !availableModelsCache.isEmpty else { return false }
-        if let loadedAt = availableModelsCacheLoadedAt,
-           Date().timeIntervalSince(loadedAt) > 6 * 60 * 60 {
-            return false
-        }
         if session.availableModels.isEmpty {
             session.updateAvailableModels(availableModelsCache)
         }
@@ -1356,18 +1354,7 @@ final class PiAppState: ObservableObject {
                 session.updateLaunchRequest(request)
             }
             if let current = session.runtimeState {
-                session.updateRuntimeState(
-                    SessionRuntimeState(
-                        sessionID: current.sessionID,
-                        sessionPath: current.sessionPath,
-                        provider: model.provider,
-                        modelID: model.modelID,
-                        modelName: model.name,
-                        thinkingLevel: current.thinkingLevel,
-                        tokens: current.tokens,
-                        contextUsage: current.contextUsage
-                    )
-                )
+                session.updateRuntimeState(runtime(current, applyingSelectedModel: model))
             }
             statusMessage = "Model: \(model.shortLabel)"
             return
@@ -1379,18 +1366,7 @@ final class PiAppState: ObservableObject {
         }
 
         if let current = session.runtimeState {
-            session.updateRuntimeState(
-                SessionRuntimeState(
-                    sessionID: current.sessionID,
-                    sessionPath: current.sessionPath,
-                    provider: model.provider,
-                    modelID: model.modelID,
-                    modelName: model.name,
-                    thinkingLevel: current.thinkingLevel,
-                    tokens: current.tokens,
-                    contextUsage: current.contextUsage
-                )
-            )
+            session.updateRuntimeState(runtime(current, applyingSelectedModel: model))
         }
 
         let sessionKey = runtimeSessionKey(for: session)
@@ -1408,7 +1384,7 @@ final class PiAppState: ObservableObject {
                 await MainActor.run {
                     guard let self, let session, self.host == remoteAPIHost else { return }
                     guard (self.modelMutationVersionBySessionKey[sessionKey] ?? 0) == mutationVersion else { return }
-                    session.updateRuntimeState(runtime)
+                    session.updateRuntimeState(self.runtime(runtime, applyingSelectedModel: model))
                     self.statusMessage = "Model: \(runtime.modelDisplayName)"
                 }
             } catch {
@@ -1556,6 +1532,48 @@ final class PiAppState: ObservableObject {
             thinkingLevel: pendingLevel,
             tokens: runtime.tokens,
             contextUsage: runtime.contextUsage
+        )
+    }
+
+    private func runtimeApplyingKnownModelContext(_ runtime: SessionRuntimeState) -> SessionRuntimeState {
+        guard let provider = runtime.provider?.nilIfBlank,
+              let modelID = runtime.modelID?.nilIfBlank,
+              let model = availableModelsCache.first(where: { $0.provider == provider && $0.modelID == modelID }),
+              model.contextWindow != nil else {
+            return runtime
+        }
+        return self.runtime(runtime, applyingSelectedModel: model)
+    }
+
+    private func runtime(_ runtime: SessionRuntimeState, applyingSelectedModel model: PiModelOption) -> SessionRuntimeState {
+        SessionRuntimeState(
+            sessionID: runtime.sessionID,
+            sessionPath: runtime.sessionPath,
+            provider: model.provider,
+            modelID: model.modelID,
+            modelName: model.name,
+            thinkingLevel: runtime.thinkingLevel,
+            tokens: runtime.tokens,
+            contextUsage: contextUsage(runtime.contextUsage, applyingContextWindow: model.contextWindow, tokens: runtime.tokens)
+        )
+    }
+
+    private func contextUsage(
+        _ current: SessionContextUsage?,
+        applyingContextWindow contextWindow: Int?,
+        tokens totals: SessionTokenTotals
+    ) -> SessionContextUsage? {
+        let tokenCount = current?.tokens ?? (totals.total > 0 ? totals.total : 0)
+        let percent: Double?
+        if let contextWindow, contextWindow > 0 {
+            percent = Double(tokenCount) / Double(contextWindow) * 100
+        } else {
+            percent = current?.percent
+        }
+        return SessionContextUsage(
+            tokens: tokenCount,
+            contextWindow: contextWindow ?? current?.contextWindow,
+            percent: percent
         )
     }
 
@@ -2152,7 +2170,11 @@ final class PiAppState: ObservableObject {
             session.appendPersistedPage(delta)
             syncSidebarTitleIfNeeded(for: session, previousTitle: previousTitle)
             let sessionKey = runtimeSessionKey(for: session)
-            session.updateRuntimeState(runtimeApplyingPendingThinkingLevel(runtime, sessionKey: sessionKey))
+            session.updateRuntimeState(
+                runtimeApplyingKnownModelContext(
+                    runtimeApplyingPendingThinkingLevel(runtime, sessionKey: sessionKey)
+                )
+            )
             applyCachedAvailableModels(to: session)
         } catch {
             // Best-effort background sync: keep the current transcript and
@@ -2233,8 +2255,9 @@ final class PiAppState: ObservableObject {
             repairSelectionIfNeeded()
         case .runtimeChanged(let sessionId, let runtime):
             if sessionId.isEmpty { return }
+            let effectiveRuntime = runtimeApplyingKnownModelContext(runtime)
             for tab in chatWorkspace.tabs where tab.sessionID?.nilIfBlank == sessionId {
-                tab.updateRuntimeState(runtime)
+                tab.updateRuntimeState(effectiveRuntime)
             }
         case .unknown:
             break
