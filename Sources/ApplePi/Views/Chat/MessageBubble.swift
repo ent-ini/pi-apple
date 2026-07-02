@@ -96,8 +96,17 @@ private struct UserMessagePresentation {
     }
 
     static func sanitizeTextOnly(_ rawText: String) -> String {
-        normalizeVisibleText(removeSourceTags(from: rawText))
+        let visible = normalizeVisibleText(removeSourceTags(from: rawText))
+        // When the user sends only attachments, the transport still needs a
+        // tiny textual prompt for Pi. That fallback is not user-authored
+        // content, so don't render it in the visible chat bubble.
+        if visible == attachmentOnlyFallbackPrompt {
+            return ""
+        }
+        return visible
     }
+
+    private static let attachmentOnlyFallbackPrompt = "Please inspect the attached item(s)."
 
     private struct Extraction {
         let attachments: [UserVisibleAttachment]
