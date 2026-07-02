@@ -863,8 +863,8 @@ final class ChatSession: ObservableObject, Identifiable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static let transientUserLineIndex = Int.max - 2_000
     private static let transientStreamLineIndexBase = Int.max - 1_000
-    private static let transientUserLineIndex = Int.max - 1
     private static let transientAssistantLineIndex = Int.max
 }
 

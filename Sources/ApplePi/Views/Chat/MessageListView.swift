@@ -136,7 +136,19 @@ struct MessageListView: View {
 
     private func refreshDisplayedRowsCache() {
         let allEvents = session.events
-        displayedRowsCache = DisplayedSessionRow.groupingToolResults(in: allEvents.filter(\.isVisibleInTranscript))
+        let visibleEvents = allEvents.filter(\.isVisibleInTranscript)
+        let orderedVisibleEvents = visibleEvents
+            .enumerated()
+            .sorted { lhs, rhs in
+                let lhsLine = lhs.element.lineIndex
+                let rhsLine = rhs.element.lineIndex
+                if lhsLine != rhsLine {
+                    return lhsLine < rhsLine
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+        displayedRowsCache = DisplayedSessionRow.groupingToolResults(in: orderedVisibleEvents)
         fileReferenceBaseDirectoryCache = resolveFileReferenceBaseDirectory(from: allEvents)
     }
 
