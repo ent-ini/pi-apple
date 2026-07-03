@@ -6,7 +6,7 @@ import ApplePiRemote
 /// Lightweight Markdown renderer for chat messages. It intentionally avoids
 /// adding a heavy dependency while covering the shapes Pi responses commonly
 /// use: paragraphs with inline emphasis/code/links, headings, lists, block
-/// quotes, horizontal rules, and fenced code blocks.
+/// quotes, GitHub-flavored pipe tables, horizontal rules, and fenced code blocks.
 struct MarkdownText: View {
     let text: String
 
@@ -88,6 +88,8 @@ struct MarkdownText: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.primary.opacity(0.055))
             )
+        case .table(let table):
+            tableView(table)
         case .rule:
             Rectangle()
                 .fill(Color.secondary.opacity(0.25))
@@ -106,6 +108,53 @@ struct MarkdownText: View {
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func tableView(_ table: MarkdownTable) -> some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(0..<table.columnCount, id: \.self) { column in
+                        tableCell(
+                            table.header[safe: column] ?? "",
+                            alignment: table.alignment(for: column),
+                            isHeader: true
+                        )
+                    }
+                }
+
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(0..<table.columnCount, id: \.self) { column in
+                            tableCell(
+                                row[safe: column] ?? "",
+                                alignment: table.alignment(for: column),
+                                isHeader: false
+                            )
+                        }
+                    }
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
+            )
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private func tableCell(_ text: String, alignment: MarkdownTable.Alignment, isHeader: Bool) -> some View {
+        inlineMarkdownText(text.isEmpty ? " " : text)
+            .font(isHeader ? .body.weight(.semibold) : .body)
+            .multilineTextAlignment(alignment.textAlignment)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(minWidth: 88, maxWidth: 240, alignment: alignment.frameAlignment)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(isHeader ? Color.primary.opacity(0.055) : Color.clear)
+            .overlay(Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 1), alignment: .trailing)
+            .overlay(Rectangle().fill(Color.secondary.opacity(0.14)).frame(height: 1), alignment: .bottom)
     }
 
     private func inlineMarkdownText(_ text: String) -> Text {
@@ -191,6 +240,13 @@ struct MarkdownText: View {
                 flushParagraph()
                 append(.heading(level: heading.level, text: heading.text))
                 lineIndex += 1
+                continue
+            }
+
+            if let table = tableInfo(in: lines, startingAt: lineIndex) {
+                flushParagraph()
+                append(.table(table.table))
+                lineIndex += table.consumedLineCount
                 continue
             }
 
@@ -285,6 +341,92 @@ struct MarkdownText: View {
             .trimmingCharacters(in: .whitespaces)
     }
 
+    private static func tableInfo(in lines: [String], startingAt lineIndex: Int) -> (table: MarkdownTable, consumedLineCount: Int)? {
+        guard lineIndex + 1 < lines.count,
+              let header = tableRowCells(from: lines[lineIndex]),
+              header.count >= 2,
+              let alignments = tableSeparatorAlignments(from: lines[lineIndex + 1]),
+              alignments.count == header.count else {
+            return nil
+        }
+
+        var rows: [[String]] = []
+        var cursor = lineIndex + 2
+        while cursor < lines.count,
+              let row = tableRowCells(from: lines[cursor]),
+              row.count > 0 {
+            rows.append(normalizedTableRow(row, columnCount: header.count))
+            cursor += 1
+        }
+
+        return (
+            table: MarkdownTable(
+                header: normalizedTableRow(header, columnCount: header.count),
+                alignments: alignments,
+                rows: rows
+            ),
+            consumedLineCount: cursor - lineIndex
+        )
+    }
+
+    private static func tableRowCells(from line: String) -> [String]? {
+        guard line.contains("|") else { return nil }
+        var cells: [String] = []
+        var current = ""
+        var isEscaped = false
+
+        for character in line {
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+            } else if character == "\\" {
+                isEscaped = true
+            } else if character == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        if isEscaped {
+            current.append("\\")
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+
+        if cells.first == "" {
+            cells.removeFirst()
+        }
+        if cells.last == "" {
+            cells.removeLast()
+        }
+        return cells.isEmpty ? nil : cells
+    }
+
+    private static func tableSeparatorAlignments(from line: String) -> [MarkdownTable.Alignment]? {
+        guard let cells = tableRowCells(from: line) else { return nil }
+        let alignments = cells.map { cell -> MarkdownTable.Alignment? in
+            let trimmed = cell.trimmingCharacters(in: .whitespaces)
+            guard trimmed.count >= 3 else { return nil }
+            let hasLeadingColon = trimmed.hasPrefix(":")
+            let hasTrailingColon = trimmed.hasSuffix(":")
+            let core = trimmed
+                .trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+                .replacingOccurrences(of: " ", with: "")
+            guard core.count >= 3, core.allSatisfy({ $0 == "-" }) else { return nil }
+            if hasLeadingColon && hasTrailingColon { return .center }
+            if hasTrailingColon { return .trailing }
+            return .leading
+        }
+        guard alignments.allSatisfy({ $0 != nil }) else { return nil }
+        return alignments.compactMap { $0 }
+    }
+
+    private static func normalizedTableRow(_ row: [String], columnCount: Int) -> [String] {
+        if row.count == columnCount { return row }
+        if row.count > columnCount { return Array(row.prefix(columnCount)) }
+        return row + Array(repeating: "", count: columnCount - row.count)
+    }
+
     private static func isHorizontalRule(_ trimmedLine: String) -> Bool {
         guard trimmedLine.count >= 3 else { return false }
         let withoutSpaces = trimmedLine.replacingOccurrences(of: " ", with: "")
@@ -369,9 +511,53 @@ struct MarkdownBlock: Identifiable, Equatable, Sendable {
         case orderedItem(marker: String, text: String)
         case quote(String)
         case code(language: String?, code: String)
+        case table(MarkdownTable)
         case rule
     }
 
     let id: Int
     let kind: Kind
+}
+
+struct MarkdownTable: Equatable, Sendable {
+    enum Alignment: Equatable, Sendable {
+        case leading
+        case center
+        case trailing
+
+        var frameAlignment: SwiftUI.Alignment {
+            switch self {
+            case .leading: return .leading
+            case .center: return .center
+            case .trailing: return .trailing
+            }
+        }
+
+        var textAlignment: TextAlignment {
+            switch self {
+            case .leading: return .leading
+            case .center: return .center
+            case .trailing: return .trailing
+            }
+        }
+    }
+
+    let header: [String]
+    let alignments: [Alignment]
+    let rows: [[String]]
+
+    var columnCount: Int {
+        max(header.count, alignments.count)
+    }
+
+    func alignment(for column: Int) -> Alignment {
+        alignments[safe: column] ?? .leading
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard indices.contains(index) else { return nil }
+        return self[index]
+    }
 }

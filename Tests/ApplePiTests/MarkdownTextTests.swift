@@ -68,4 +68,33 @@ struct MarkdownTextTests {
             .paragraph("Done")
         ])
     }
+
+    @Test
+    @MainActor
+    func parsesGitHubFlavoredPipeTables() {
+        let markdown = """
+        Before
+
+        | Name | Count | Ratio |
+        |:---|---:|:---:|
+        | Apples | 12 | 40% |
+        | Oranges | 8 | 60% |
+
+        After
+        """
+
+        let blocks = MarkdownText.parseBlocks(markdown)
+
+        #expect(blocks.count == 3)
+        #expect(blocks[0].kind == .paragraph("Before"))
+        #expect(blocks[1].kind == .table(MarkdownTable(
+            header: ["Name", "Count", "Ratio"],
+            alignments: [.leading, .trailing, .center],
+            rows: [
+                ["Apples", "12", "40%"],
+                ["Oranges", "8", "60%"]
+            ]
+        )))
+        #expect(blocks[2].kind == .paragraph("After"))
+    }
 }
