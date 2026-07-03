@@ -441,7 +441,7 @@ final class ChatSession: ObservableObject, Identifiable {
         return didUpdateTitle
     }
 
-    func loadEarlierHistory(limit: Int = 60) {
+    func loadEarlierHistory(limit: Int = 60, preserveVisiblePosition: Bool = false) {
         guard let historyPageLoader,
               !isLoadingEarlierHistory,
               !isLoading else { return }
@@ -452,7 +452,7 @@ final class ChatSession: ObservableObject, Identifiable {
             return
         }
 
-        let anchorEventID = persistedEvents.first?.id
+        let anchorEventID = preserveVisiblePosition ? persistedEvents.first?.id : nil
         isLoadingEarlierHistory = true
         loadError = nil
 

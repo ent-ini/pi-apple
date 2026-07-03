@@ -549,13 +549,57 @@ private actor SessionEventsPageBox {
 
     session.loadFromDisk(force: true)
     try await waitUntil { session.firstPersistedLineIndex == 2 }
-    session.loadEarlierHistory(limit: 120)
+    session.loadEarlierHistory(limit: 120, preserveVisiblePosition: true)
     try await waitUntil { session.firstPersistedLineIndex == 0 }
 
     #expect(session.firstPersistedLineIndex == 0)
     #expect(session.hasEarlierHistory == false)
     #expect(session.pendingHistoryAnchorID == "message:m2")
     #expect(session.consumePendingHistoryAnchorID() == "message:m2")
+}
+
+@MainActor
+@Test func chatSessionNonUserInitiatedHistoryLoadDoesNotExposeScrollAnchor() async throws {
+    let session = ChatSession(
+        key: "test",
+        title: "Test",
+        eventLoader: {
+            SessionEventsPage(
+                events: [
+                    .message(
+                        Message(id: "m2", role: .assistant, content: [.text("two")], model: nil, timestamp: nil, parentId: nil),
+                        lineIndex: 2
+                    )
+                ],
+                firstLine: 2,
+                lastLine: 2,
+                hasMoreBefore: true,
+                hasMoreAfter: false
+            )
+        },
+        historyPageLoader: { _, _ in
+            SessionEventsPage(
+                events: [
+                    .message(
+                        Message(id: "m1", role: .assistant, content: [.text("one")], model: nil, timestamp: nil, parentId: nil),
+                        lineIndex: 1
+                    )
+                ],
+                firstLine: 1,
+                lastLine: 1,
+                hasMoreBefore: true,
+                hasMoreAfter: true
+            )
+        }
+    )
+
+    session.loadFromDisk(force: true)
+    try await waitUntil { session.firstPersistedLineIndex == 2 }
+    session.loadEarlierHistory(limit: 120, preserveVisiblePosition: false)
+    try await waitUntil { session.firstPersistedLineIndex == 1 }
+
+    #expect(session.pendingHistoryAnchorID == nil)
+    #expect(session.consumePendingHistoryAnchorID() == nil)
 }
 
 // MARK: - ChatSessionStore close/closeAll cancellation

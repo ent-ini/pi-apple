@@ -23,6 +23,7 @@ struct MessageListView: View {
     @State private var bottomScrollGeneration = 0
     @State private var ensureVisibleGeneration = 0
     @State private var recentUserScrollUntil: Date?
+    @State private var historyLoadRowMinY: CGFloat = .greatestFiniteMagnitude
     @State private var displayedRowsCache: [DisplayedSessionRow] = []
     @State private var fileReferenceBaseDirectoryCache: String?
 
@@ -75,6 +76,10 @@ struct MessageListView: View {
                         scrollProxy: scrollProxy
                     )
                 }
+                .onPreferenceChange(HistoryLoadRowMinYPreferenceKey.self) { minY in
+                    historyLoadRowMinY = minY
+                    autoLoadEarlierHistoryIfUserScrolledNearTop()
+                }
                 .onChange(of: session.streamRevision) { _, _ in
                     refreshDisplayedRowsCache()
                     scheduleScrollToBottomIfNeeded(using: scrollProxy)
@@ -121,6 +126,7 @@ struct MessageListView: View {
     private static let bottomAnchorID = "chat.list.bottom"
     static let scrollCoordinateSpaceName = "chat.list.scroll"
     private static let bottomStickinessBuffer: CGFloat = 180
+    private static let historyAutoLoadDistance: CGFloat = 280
     // Streaming can grow the transcript by more than a few pixels before the
     // next scroll-to-bottom pass runs. Keep enough slack to stay pinned when the
     // user was already at the bottom, while still letting an intentional scroll
@@ -192,18 +198,37 @@ struct MessageListView: View {
         }
         .frame(minHeight: 36)
         .contentShape(Rectangle())
-        .id("history-load-\(session.firstPersistedLineIndex)")
-        .onAppear {
-            loadEarlierHistoryPage()
+        .background {
+            GeometryReader { historyProxy in
+                Color.clear.preference(
+                    key: HistoryLoadRowMinYPreferenceKey.self,
+                    value: historyProxy.frame(in: .named(Self.scrollCoordinateSpaceName)).minY
+                )
+            }
         }
+        .id("history-load-\(session.firstPersistedLineIndex)")
     }
 
     private func loadEarlierHistoryPage() {
+        loadEarlierHistoryPage(userInitiated: true)
+    }
+
+    private func loadEarlierHistoryPage(userInitiated: Bool) {
         guard session.hasEarlierHistory,
               !session.isLoadingEarlierHistory else {
             return
         }
-        session.loadEarlierHistory(limit: Self.historyPageSize)
+        session.loadEarlierHistory(limit: Self.historyPageSize, preserveVisiblePosition: userInitiated)
+    }
+
+    private func autoLoadEarlierHistoryIfUserScrolledNearTop() {
+        guard isRecentUserScrollActive,
+              historyLoadRowMinY.isFinite,
+              historyLoadRowMinY >= -Self.historyAutoLoadDistance,
+              historyLoadRowMinY <= Self.historyAutoLoadDistance else {
+            return
+        }
+        loadEarlierHistoryPage(userInitiated: true)
     }
 
     private var isStickyAutoScrollActive: Bool {
@@ -268,6 +293,7 @@ struct MessageListView: View {
 
     private func noteUserScrollIntent() {
         recentUserScrollUntil = Date().addingTimeInterval(Self.recentUserScrollDuration)
+        autoLoadEarlierHistoryIfUserScrolledNearTop()
     }
 
     private func startStickyAutoScroll() {
@@ -353,6 +379,14 @@ struct MessageListView: View {
 // MARK: - Display rows
 
 private struct BottomAnchorMaxYPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct HistoryLoadRowMinYPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = .greatestFiniteMagnitude
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
