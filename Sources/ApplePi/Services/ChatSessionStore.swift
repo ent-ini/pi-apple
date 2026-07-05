@@ -13,7 +13,12 @@ final class ChatSession: ObservableObject, Identifiable {
     var key: String
     @Published var title: String
     @Published private(set) var events: [SessionEvent] = []
-    @Published private(set) var statusMessage: String = ""
+    @Published private(set) var statusMessage: String = "" {
+        didSet {
+            guard !statusMessage.isEmpty else { return }
+            DiagnosticsLogBuffer.shared.append(level: "info", category: "session.status", message: statusMessage, metadata: ["session": title])
+        }
+    }
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var loadError: String?
     @Published private(set) var isSending: Bool = false
@@ -417,6 +422,7 @@ final class ChatSession: ObservableObject, Identifiable {
     @discardableResult
     func appendPersistedPage(_ page: SessionEventsPage) -> Bool {
         let didUpdateTitle = updateTitleFromSessionMetadata(in: page.events)
+        let previousFirstLineIndex = persistedEvents.first?.lineIndex
         var seenIDs = Set(persistedEvents.map(\.id))
         var freshEvents: [SessionEvent] = []
         freshEvents.reserveCapacity(page.events.count)
@@ -436,7 +442,19 @@ final class ChatSession: ObservableObject, Identifiable {
             statusMessage = "\(persistedEvents.count) events"
         }
         if page.hasMoreBefore {
-            hasEarlierHistory = true
+            // `hasMoreBefore` is relative to the returned page, not necessarily
+            // to the transcript window already visible in the app. Delta polls
+            // use `after=<lastPersistedLineIndex>`; pi-appd correctly reports
+            // `hasMoreBefore = true` for those pages because earlier JSONL rows
+            // exist before the delta, but those rows may already be loaded. Do
+            // not turn on the "Load earlier messages" affordance for a pure
+            // append page that starts after our current first visible row.
+            let pageStartsAfterVisibleWindow = previousFirstLineIndex.map { previousFirstLine in
+                page.firstLine.map { $0 > previousFirstLine } ?? false
+            } ?? false
+            if !pageStartsAfterVisibleWindow {
+                hasEarlierHistory = true
+            }
         }
         return didUpdateTitle
     }

@@ -438,6 +438,49 @@ private actor SessionEventsPageBox {
 }
 
 @MainActor
+@Test func chatSessionDeltaAppendDoesNotExposeAlreadyLoadedEarlierHistory() async throws {
+    let session = ChatSession(
+        key: "test",
+        title: "Test",
+        eventLoader: {
+            SessionEventsPage(
+                events: [
+                    .message(
+                        Message(id: "m0", role: .user, content: [.text("first")], model: nil, timestamp: nil, parentId: nil),
+                        lineIndex: 0
+                    )
+                ],
+                firstLine: 0,
+                lastLine: 0,
+                hasMoreBefore: false,
+                hasMoreAfter: false
+            )
+        }
+    )
+
+    session.loadFromDisk(force: true)
+    try await waitUntil { session.firstPersistedLineIndex == 0 }
+    #expect(session.hasEarlierHistory == false)
+
+    session.appendPersistedPage(SessionEventsPage(
+        events: [
+            .message(
+                Message(id: "m1", role: .assistant, content: [.text("reply")], model: nil, timestamp: nil, parentId: nil),
+                lineIndex: 1
+            )
+        ],
+        firstLine: 1,
+        lastLine: 1,
+        hasMoreBefore: true,
+        hasMoreAfter: false
+    ))
+
+    #expect(session.firstPersistedLineIndex == 0)
+    #expect(session.lastPersistedLineIndex == 1)
+    #expect(session.hasEarlierHistory == false)
+}
+
+@MainActor
 @Test func chatSessionPagedReloadKeepsPreviouslyLoadedRowsVisible() async throws {
     let pageBox = SessionEventsPageBox(SessionEventsPage(
         events: [

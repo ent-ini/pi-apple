@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var apiTokenStatus: String?
     @State private var groqAPIKeyInput: String = ""
     @State private var groqAPIKeyStatus: String?
+    @State private var diagnosticsCopyStatus: String?
     @State private var isConfirmingClearAPIToken = false
     @State private var isConfirmingClearGroqAPIKey = false
     @State private var isConfirmingHostCommit = false
@@ -23,6 +24,7 @@ struct SettingsView: View {
             appearanceSection
             shortcutsSection
             hostSections
+            diagnosticsSection
             piDefaultsSection
             voiceSection
             Section("Notifications") {
@@ -359,6 +361,53 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Diagnostics gateway
+
+    @ViewBuilder
+    private var diagnosticsSection: some View {
+        Section {
+            Toggle("Enable direct diagnostics gateway", isOn: Binding(
+                get: { appState.diagnosticsGatewayEnabled },
+                set: { appState.setDiagnosticsGatewayEnabled($0) }
+            ))
+
+            Text(appState.diagnosticsGatewayState.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Protected with the same bearer token as Remote API. Disable when you are done debugging.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Logs endpoint")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(appState.diagnosticsGatewayLogsURL)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                Button("Copy curl") {
+                    copyDiagnosticsCurlCommand()
+                }
+                if let diagnosticsCopyStatus {
+                    Text(diagnosticsCopyStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        } header: {
+            Text("Diagnostics Gateway")
+        } footer: {
+            Text("The server listens on port \(appState.diagnosticsGatewayState.port). Use your Mac's Tailscale IP in place of <this-mac-tailscale-ip>.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Host sections (Remote API + Apply/Discard bar)
 
     @ViewBuilder
@@ -644,6 +693,12 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private func copyDiagnosticsCurlCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(appState.diagnosticsGatewayCurlCommand, forType: .string)
+        diagnosticsCopyStatus = "Copied. Set APPLEPI_TOKEN to the stored bearer token."
     }
 
     private func requestCopyCurlWithToken() {

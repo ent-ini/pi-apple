@@ -38,6 +38,7 @@ final class PiAppState: ObservableObject {
             // start a fresh one for the new host.
             if startsBackgroundWork {
                 startCatalogLiveUpdates()
+                applyDiagnosticsGatewayPreference()
             }
         }
     }
@@ -54,7 +55,12 @@ final class PiAppState: ObservableObject {
     @Published var sessionSearchText = ""
     @Published private(set) var pendingSessionSearchFocusRequest = false
     @Published private(set) var sessionSearchFocusRequestID = 0
-    @Published var statusMessage = "Ready"
+    @Published var statusMessage = "Ready" {
+        didSet {
+            guard !isLoadingPersistedState else { return }
+            DiagnosticsLogBuffer.shared.append(level: "info", category: "app.status", message: statusMessage)
+        }
+    }
     @Published var isLoadingCatalog = false
     @Published var showsNewSessionSheet = false
     @Published var newSessionWorkingDirectory = ""
@@ -83,6 +89,8 @@ final class PiAppState: ObservableObject {
     @Published private(set) var sessionActivityOverrides: [String: Date] = [:]
     @Published private(set) var defaultModelPreference: DefaultModelPreference?
     @Published private(set) var isLoadingAvailableModels = false
+    @Published private(set) var diagnosticsGatewayEnabled = false
+    @Published private(set) var diagnosticsGatewayState = DiagnosticsGatewayState()
 
     let chatWorkspace = ChatSessionStore()
 
@@ -97,9 +105,12 @@ final class PiAppState: ObservableObject {
     private let lastUpdateCheckKey = "ApplePi.updateCheck.lastCheckedAt"
     private let modelDefaultsKey = "ApplePi.modelDefaults"
     private let availableModelsCacheDefaultsKey = "ApplePi.availableModelsCache"
+    private let diagnosticsGatewayEnabledDefaultsKey = "ApplePi.diagnosticsGateway.enabled"
+    private let diagnosticsGatewayPort: UInt16 = 8765
     private let updateCheckInterval: TimeInterval = 24 * 60 * 60
     private let startsBackgroundWork: Bool
     private let chatTabPersistence: ChatTabPersistence
+    private let diagnosticsGateway = DiagnosticsHTTPGateway()
     private var isLoadingPersistedState = false
     private var catalogRefreshID = UUID()
     private var remoteDirectoryRefreshID = UUID()
@@ -171,7 +182,9 @@ final class PiAppState: ObservableObject {
         loadShortcutPreferences()
         loadModelDefaults()
         loadAvailableModelsCache()
+        loadDiagnosticsGatewayPreferences()
         isLoadingPersistedState = false
+        DiagnosticsLogBuffer.shared.append(level: "info", category: "app.lifecycle", message: "pi-app started")
 
         chatWorkspace.onSessionExit = { [weak self] in
             self?.scheduleCatalogRefresh()
@@ -201,6 +214,7 @@ final class PiAppState: ObservableObject {
             startCatalogAdaptivePolling()
             startSelectedSessionEventPolling()
             restartSelectedSessionEventStream()
+            applyDiagnosticsGatewayPreference()
         }
     }
 
@@ -241,10 +255,54 @@ final class PiAppState: ObservableObject {
         turnStreamFlushTask?.cancel()
         turnStreamFlushTask = nil
         clearPendingTurnStreamEvents()
+        diagnosticsGateway.stop()
         savePersistedChatTabs()
         for tab in chatWorkspace.tabs {
             tab.cancelSend()
         }
+    }
+
+    func setDiagnosticsGatewayEnabled(_ enabled: Bool) {
+        diagnosticsGatewayEnabled = enabled
+        defaults.set(enabled, forKey: diagnosticsGatewayEnabledDefaultsKey)
+        applyDiagnosticsGatewayPreference()
+    }
+
+    var diagnosticsGatewayLogsURL: String {
+        "\(diagnosticsGatewayState.baseURL)/diagnostics/logs?tail=500"
+    }
+
+    var diagnosticsGatewayHealthURL: String {
+        "\(diagnosticsGatewayState.baseURL)/diagnostics/health"
+    }
+
+    var diagnosticsGatewayCurlCommand: String {
+        "curl -H 'Authorization: Bearer $APPLEPI_TOKEN' '\(diagnosticsGatewayLogsURL)'"
+    }
+
+    private func loadDiagnosticsGatewayPreferences() {
+        diagnosticsGatewayEnabled = defaults.bool(forKey: diagnosticsGatewayEnabledDefaultsKey)
+        diagnosticsGatewayState = DiagnosticsGatewayState(isRunning: false, port: diagnosticsGatewayPort, message: "Diagnostics gateway is off.")
+    }
+
+    private func applyDiagnosticsGatewayPreference() {
+        guard diagnosticsGatewayEnabled else {
+            diagnosticsGateway.stop()
+            diagnosticsGatewayState = DiagnosticsGatewayState(isRunning: false, port: diagnosticsGatewayPort, message: "Diagnostics gateway is off.")
+            return
+        }
+        let gatewayHost = host
+        diagnosticsGateway.start(
+            port: diagnosticsGatewayPort,
+            tokenProvider: {
+                RemoteDaemonTokenStore.readToken(for: gatewayHost)
+            },
+            stateHandler: { [weak self] state in
+                Task { @MainActor in
+                    self?.diagnosticsGatewayState = state
+                }
+            }
+        )
     }
 
     private func runUpdateCheckIfNeeded() {
