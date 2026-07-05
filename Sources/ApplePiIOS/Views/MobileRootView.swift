@@ -4,33 +4,37 @@ import ApplePiCore
 struct MobileRootView: View {
     @EnvironmentObject private var appState: MobilePiAppState
     @State private var showsSettings = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
     var body: some View {
-        NavigationSplitView {
-            MobileSessionListView()
-                .navigationTitle("pi-app")
-                .toolbar {
-                    ToolbarItemGroup(placement: .primaryAction) {
-                        Button {
-                            appState.startNewSession()
-                        } label: {
-                            Label("New", systemImage: "square.and.pencil")
-                        }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            MobileSessionListView {
+                columnVisibility = .detailOnly
+            }
+            .navigationTitle("pi-app")
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        appState.startNewSession()
+                        columnVisibility = .detailOnly
+                    } label: {
+                        Label("New", systemImage: "square.and.pencil")
+                    }
 
-                        Button {
-                            Task { await appState.reloadCatalog() }
-                        } label: {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .disabled(appState.isLoadingCatalog)
+                    Button {
+                        Task { await appState.reloadCatalog() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(appState.isLoadingCatalog)
 
-                        Button {
-                            showsSettings = true
-                        } label: {
-                            Label("Settings", systemImage: "gearshape")
-                        }
+                    Button {
+                        showsSettings = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
                     }
                 }
+            }
         } detail: {
             MobileSessionDetailView()
         }
@@ -59,6 +63,7 @@ struct MobileRootView: View {
 
 private struct MobileSessionListView: View {
     @EnvironmentObject private var appState: MobilePiAppState
+    let onOpenDetail: () -> Void
 
     var body: some View {
         List(selection: selectedSessionBinding) {
@@ -80,6 +85,7 @@ private struct MobileSessionListView: View {
                 Section("Sessions") {
                     ForEach(appState.sessions) { session in
                         Button {
+                            onOpenDetail()
                             Task { await appState.selectSession(session) }
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
