@@ -959,14 +959,14 @@ final class ChatSession: ObservableObject, Identifiable {
             let persistedSignature = messageSignature(for: persistedMessage)
             if !transientSignature.isEmpty,
                transientSignature == persistedSignature,
-               messageTimestampsAreClose(transientMessage, persistedMessage) {
+               (messageTimestampsAreClose(transientMessage, persistedMessage) || transientMessage.role == .assistant) {
                 return true
             }
 
             guard persistedMessage.content == transientMessage.content else {
                 return false
             }
-            if messageTimestampsAreClose(transientMessage, persistedMessage) {
+            if messageTimestampsAreClose(transientMessage, persistedMessage) || transientMessage.role == .assistant {
                 return true
             }
             guard let transientParent = transientMessage.parentId?.nilIfBlank,
