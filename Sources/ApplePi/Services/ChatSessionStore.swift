@@ -466,7 +466,7 @@ final class ChatSession: ObservableObject, Identifiable {
             rebuildEvents()
             statusMessage = "\(persistedEvents.count) events"
         }
-        if page.hasMoreBefore {
+        if page.hasMoreBefore, !page.events.isEmpty {
             // `hasMoreBefore` is relative to the returned page, not necessarily
             // to the transcript window already visible in the app. Delta polls
             // use `after=<lastPersistedLineIndex>`; pi-appd correctly reports
