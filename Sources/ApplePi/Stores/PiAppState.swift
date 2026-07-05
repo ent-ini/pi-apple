@@ -545,11 +545,12 @@ final class PiAppState: ObservableObject {
     }
 
     func isSessionSending(_ session: PiSessionSummary) -> Bool {
-        // Sending is now an internal transport detail. The sidebar should not
-        // advertise a chat as "busy" because the composer accepts messages at
-        // all times: active generation turns the next message into steer, and
-        // post-generation finalizing/reload starts a normal new message.
-        false
+        let aliases = Set(sessionAliases(for: session))
+        guard !aliases.isEmpty else { return false }
+        return chatWorkspace.tabs.contains { tab in
+            !aliases.isDisjoint(with: Set(sessionAliases(for: tab)))
+                && (tab.hasActiveSend || tab.isSending || tab.isAwaitingTurnCommit || tab.canAcceptSteering)
+        }
     }
 
     func isSelectedSession(_ session: PiSessionSummary) -> Bool {
