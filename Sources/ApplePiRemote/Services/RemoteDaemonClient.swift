@@ -735,15 +735,22 @@ public struct RemoteDaemonClient: Sendable {
             for try await line in bytes.lines {
                 if let event = PiTurnStreamParser.parseLine(line) {
                     eventCount += 1
-                    RemoteDiagnostics.log(
-                        level: "debug",
-                        category: "remote.turn-stream.event",
-                        message: "Received turn stream event",
-                        metadata: [
-                            "type": Self.turnStreamEventType(event),
-                            "count": String(eventCount)
-                        ]
-                    )
+                    let eventType = Self.turnStreamEventType(event)
+                    // Streaming text can produce hundreds of `session_events`
+                    // per turn. Log control events every time, but sample the
+                    // high-volume payload events so the diagnostics ring buffer
+                    // keeps useful context instead of becoming token spam.
+                    if eventType != "session_events" || eventCount == 1 || eventCount.isMultiple(of: 25) {
+                        RemoteDiagnostics.log(
+                            level: "debug",
+                            category: "remote.turn-stream.event",
+                            message: "Received turn stream event",
+                            metadata: [
+                                "type": eventType,
+                                "count": String(eventCount)
+                            ]
+                        )
+                    }
                     await onEvent(event)
                     switch event {
                     case .streamError(let message):

@@ -42,6 +42,7 @@ let package = Package(
             name: "ApplePi",
             dependencies: ["ApplePiCore", "ApplePiRemote"],
             path: "Sources/ApplePi",
+            exclude: ["Info.plist"],
             resources: [
                 .copy("Resources")
             ],
