@@ -113,6 +113,8 @@ plutil -p "pi-app.app/Contents/Info.plist"
 
 [Security](SECURITY.md), [Privacy](PRIVACY.md), and [Third-Party Notices](THIRD_PARTY_NOTICES.md) if you want to know exactly what you are installing.
 
+Live macOS debugging is documented in [Diagnostics Gateway](docs/DIAGNOSTICS.md). It is opt-in, bearer-token-protected, and intended for Tailscale/private-network use.
+
 ## Requirements
 
 - macOS 14 or newer
