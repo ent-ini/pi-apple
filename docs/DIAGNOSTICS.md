@@ -55,6 +55,35 @@ curl -sS -H "Authorization: Bearer $APPLEPI_TOKEN" \
 The response is JSONL / NDJSON, one record per line.
 
 `tail` is optional. If omitted, the gateway returns the in-memory ring buffer.
+The buffer keeps records for about 1 hour and prunes older entries automatically.
+
+### UI snapshot
+
+```sh
+curl -sS -H "Authorization: Bearer $APPLEPI_TOKEN" \
+  "http://100.100.11.2:8765/diagnostics/ui"
+```
+
+Returns current app/window/workspace state as JSON: selected session, tab counts, catalog/SSE flags, loading/sending/history flags, and visible window frames.
+
+### Transcript snapshot
+
+```sh
+curl -sS -H "Authorization: Bearer $APPLEPI_TOKEN" \
+  "http://100.100.11.2:8765/diagnostics/transcript"
+```
+
+Returns the currently selected session's visible transcript rows as JSON: ids, event types, roles/tools, line indexes, and short previews.
+
+### Screenshot
+
+```sh
+curl -sS -H "Authorization: Bearer $APPLEPI_TOKEN" \
+  "http://100.100.11.2:8765/diagnostics/screenshot" \
+  -o pi-app-screenshot.png
+```
+
+Captures the app's own visible window content as PNG. This is intended for visual/layout/rendering bugs where state logs are not enough.
 
 ## What is logged
 
@@ -75,6 +104,12 @@ The diagnostics buffer is intentionally structured and redacted. Current categor
 - `diagnostics.gateway` — gateway start and requests.
 
 High-volume streaming text events are sampled so the ring buffer keeps useful context.
+
+## Retention
+
+Diagnostics logs are stored in memory for about 1 hour, with a hard cap on record count. This is meant for cases where a bug happened and the user reports it a few minutes later.
+
+The buffer resets when the app restarts. It is not currently persisted to disk.
 
 ## Security model
 

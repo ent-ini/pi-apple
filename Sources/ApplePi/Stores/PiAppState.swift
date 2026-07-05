@@ -310,8 +310,161 @@ final class PiAppState: ObservableObject {
                 Task { @MainActor in
                     self?.diagnosticsGatewayState = state
                 }
+            },
+            uiSnapshotProvider: { [weak self] in
+                self?.diagnosticsUISnapshotJSON() ?? "{}\n"
+            },
+            transcriptProvider: { [weak self] in
+                self?.diagnosticsTranscriptJSON() ?? "{}\n"
+            },
+            screenshotProvider: { [weak self] in
+                self?.diagnosticsScreenshotPNG()
             }
         )
+    }
+
+    private func diagnosticsUISnapshotJSON() -> String {
+        let selected = chatWorkspace.selectedTab
+        let visibleWindows = NSApp.windows.filter { $0.isVisible && !$0.isMiniaturized }
+        let catalogSnapshot: [String: Any] = [
+            "projects": projects.count,
+            "sessions": sessions.count,
+            "isCatalogStreamConnected": isCatalogStreamConnected,
+            "isSelectedSessionStreamConnected": isSelectedSessionStreamConnected
+        ]
+        let workspaceSnapshot: [String: Any] = [
+            "tabs": chatWorkspace.tabs.count,
+            "selectedTabID": selected?.id.uuidString ?? "",
+            "selectedSessionID": selected?.sessionID ?? "",
+            "selectedTitle": selected?.title ?? "",
+            "selectedEventCount": selected?.events.count ?? 0,
+            "selectedFirstLine": selected?.firstPersistedLineIndex ?? -1,
+            "selectedLastLine": selected?.lastPersistedLineIndex ?? -1,
+            "hasEarlierHistory": selected?.hasEarlierHistory ?? false,
+            "isLoadingEarlierHistory": selected?.isLoadingEarlierHistory ?? false,
+            "isLoading": selected?.isLoading ?? false,
+            "isSending": selected?.isSending ?? false,
+            "isAwaitingTurnCommit": selected?.isAwaitingTurnCommit ?? false,
+            "canAcceptSteering": selected?.canAcceptSteering ?? false,
+            "hasActiveSend": selected?.hasActiveSend ?? false
+        ]
+        let windowSnapshots: [[String: Any]] = visibleWindows.map { window in
+            let frame: [String: Any] = [
+                "x": Int(window.frame.origin.x),
+                "y": Int(window.frame.origin.y),
+                "width": Int(window.frame.size.width),
+                "height": Int(window.frame.size.height)
+            ]
+            return [
+                "title": window.title,
+                "isKey": window.isKeyWindow,
+                "isMain": window.isMainWindow,
+                "frame": frame
+            ]
+        }
+        let payload: [String: Any] = [
+            "generatedAt": ISO8601DateFormatter().string(from: Date()),
+            "host": host.remoteDaemonDisplayAddress,
+            "statusMessage": statusMessage,
+            "isLoadingCatalog": isLoadingCatalog,
+            "catalog": catalogSnapshot,
+            "workspace": workspaceSnapshot,
+            "windows": windowSnapshots
+        ]
+        return Self.diagnosticsJSONString(payload)
+    }
+
+    private func diagnosticsTranscriptJSON() -> String {
+        let selected = chatWorkspace.selectedTab
+        let visibleEvents = selected?.events.filter(\.isVisibleInTranscript) ?? []
+        let payload: [String: Any] = [
+            "generatedAt": ISO8601DateFormatter().string(from: Date()),
+            "sessionID": selected?.sessionID ?? "",
+            "title": selected?.title ?? "",
+            "eventCount": selected?.events.count ?? 0,
+            "visibleEventCount": visibleEvents.count,
+            "firstLine": selected?.firstPersistedLineIndex ?? -1,
+            "lastLine": selected?.lastPersistedLineIndex ?? -1,
+            "hasEarlierHistory": selected?.hasEarlierHistory ?? false,
+            "rows": visibleEvents.map(Self.diagnosticsEventSummary)
+        ]
+        return Self.diagnosticsJSONString(payload)
+    }
+
+    private func diagnosticsScreenshotPNG() -> Data? {
+        guard let window = NSApp.windows.first(where: { $0.isVisible && !$0.isMiniaturized && $0.contentView != nil }),
+              let contentView = window.contentView else {
+            return nil
+        }
+        let bounds = contentView.bounds
+        guard bounds.width > 0,
+              bounds.height > 0,
+              let representation = contentView.bitmapImageRepForCachingDisplay(in: bounds) else {
+            return nil
+        }
+        contentView.cacheDisplay(in: bounds, to: representation)
+        return representation.representation(using: .png, properties: [:])
+    }
+
+    private static func diagnosticsEventSummary(_ event: SessionEvent) -> [String: Any] {
+        var summary: [String: Any] = [
+            "id": event.id,
+            "lineIndex": event.lineIndex,
+            "preview": diagnosticsEventPreview(event)
+        ]
+        switch event {
+        case .meta:
+            summary["type"] = "meta"
+        case .message(let message, _):
+            summary["type"] = "message"
+            summary["role"] = message.role.rawValue
+            summary["contentBlocks"] = message.content.count
+            summary["model"] = message.model ?? ""
+        case .toolCall(let call, _):
+            summary["type"] = "toolCall"
+            summary["tool"] = call.name
+        case .toolResult(let result, _):
+            summary["type"] = "toolResult"
+            summary["tool"] = result.toolName ?? ""
+            summary["isError"] = result.isError
+        case .other(let type, _):
+            summary["type"] = "other"
+            summary["eventType"] = type
+        }
+        return summary
+    }
+
+    private static func diagnosticsEventPreview(_ event: SessionEvent) -> String {
+        let raw: String
+        switch event {
+        case .meta(let meta, _):
+            raw = meta.displayName ?? meta.id
+        case .message(let message, _):
+            raw = message.content.map { block in
+                switch block {
+                case .text(let text): return text
+                case .thinking(let text, _): return "[thinking] \(text)"
+                case .image(let path, _): return "[image] \(path)"
+                }
+            }.joined(separator: " ")
+        case .toolCall(let call, _):
+            raw = "\(call.name) \(call.arguments)"
+        case .toolResult(let result, _):
+            raw = result.output
+        case .other(let type, _):
+            raw = type
+        }
+        let collapsed = raw.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return String(collapsed.prefix(500))
+    }
+
+    private static func diagnosticsJSONString(_ object: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}\n"
+        }
+        return text + "\n"
     }
 
     private func runUpdateCheckIfNeeded() {

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 @preconcurrency import Network
 import ApplePiCore
 import ApplePiRemote
@@ -26,11 +27,13 @@ final class DiagnosticsLogBuffer: @unchecked Sendable {
 
     private let lock = NSLock()
     private let maxRecords: Int
+    private let retentionInterval: TimeInterval
     private var records: [DiagnosticsLogRecord] = []
     private let encoder: JSONEncoder
 
-    init(maxRecords: Int = 2_000) {
+    init(maxRecords: Int = 10_000, retentionInterval: TimeInterval = 60 * 60) {
         self.maxRecords = maxRecords
+        self.retentionInterval = retentionInterval
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
@@ -51,6 +54,7 @@ final class DiagnosticsLogBuffer: @unchecked Sendable {
             metadata: metadata.mapValues(Self.redact)
         )
         lock.lock()
+        pruneLocked(now: record.timestamp)
         records.append(record)
         if records.count > maxRecords {
             records.removeFirst(records.count - maxRecords)
@@ -60,6 +64,7 @@ final class DiagnosticsLogBuffer: @unchecked Sendable {
 
     func count() -> Int {
         lock.lock()
+        pruneLocked(now: Date())
         let count = records.count
         lock.unlock()
         return count
@@ -67,6 +72,7 @@ final class DiagnosticsLogBuffer: @unchecked Sendable {
 
     func jsonLines(tail: Int?) -> String {
         lock.lock()
+        pruneLocked(now: Date())
         let snapshot: [DiagnosticsLogRecord]
         if let tail, tail > 0, tail < records.count {
             snapshot = Array(records.suffix(tail))
@@ -79,6 +85,11 @@ final class DiagnosticsLogBuffer: @unchecked Sendable {
             guard let data = try? encoder.encode(record) else { return nil }
             return String(data: data, encoding: .utf8)
         }.joined(separator: "\n") + (snapshot.isEmpty ? "" : "\n")
+    }
+
+    private func pruneLocked(now: Date) {
+        let cutoff = now.addingTimeInterval(-retentionInterval)
+        records.removeAll { $0.timestamp < cutoff }
     }
 
     private static func redact(_ value: String) -> String {
@@ -100,12 +111,17 @@ final class DiagnosticsLogBuffer: @unchecked Sendable {
 final class DiagnosticsHTTPGateway: @unchecked Sendable {
     typealias TokenProvider = () -> String?
     typealias StateHandler = (DiagnosticsGatewayState) -> Void
+    typealias JSONProvider = @MainActor () -> String
+    typealias DataProvider = @MainActor () -> Data?
 
     private let logger: DiagnosticsLogBuffer
     private let queue = DispatchQueue(label: "com.dodoreach.applepi.diagnostics-gateway")
     private var listener: NWListener?
     private var tokenProvider: TokenProvider?
     private var stateHandler: StateHandler?
+    private var uiSnapshotProvider: JSONProvider?
+    private var transcriptProvider: JSONProvider?
+    private var screenshotProvider: DataProvider?
     private var port: UInt16 = 8765
 
     init(logger: DiagnosticsLogBuffer = .shared) {
@@ -115,12 +131,18 @@ final class DiagnosticsHTTPGateway: @unchecked Sendable {
     func start(
         port: UInt16 = 8765,
         tokenProvider: @escaping TokenProvider,
-        stateHandler: @escaping StateHandler
+        stateHandler: @escaping StateHandler,
+        uiSnapshotProvider: JSONProvider? = nil,
+        transcriptProvider: JSONProvider? = nil,
+        screenshotProvider: DataProvider? = nil
     ) {
         stop()
         self.port = port
         self.tokenProvider = tokenProvider
         self.stateHandler = stateHandler
+        self.uiSnapshotProvider = uiSnapshotProvider
+        self.transcriptProvider = transcriptProvider
+        self.screenshotProvider = screenshotProvider
 
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             report(isRunning: false, message: "Invalid diagnostics port \(port).")
@@ -149,6 +171,9 @@ final class DiagnosticsHTTPGateway: @unchecked Sendable {
     func stop() {
         listener?.cancel()
         listener = nil
+        uiSnapshotProvider = nil
+        transcriptProvider = nil
+        screenshotProvider = nil
         report(isRunning: false, message: "Diagnostics gateway is off.")
     }
 
@@ -218,6 +243,43 @@ final class DiagnosticsHTTPGateway: @unchecked Sendable {
         case "/diagnostics/logs":
             let tail = request.queryItems["tail"].flatMap(Int.init)
             send(status: 200, contentType: "application/x-ndjson; charset=utf-8", body: logger.jsonLines(tail: tail), on: connection)
+        case "/diagnostics/ui":
+            guard let uiSnapshotProvider else {
+                send(status: 503, contentType: "text/plain; charset=utf-8", body: "ui snapshot is unavailable\n", on: connection)
+                return
+            }
+            Task { @MainActor in
+                let body = uiSnapshotProvider()
+                self.queue.async {
+                    self.send(status: 200, contentType: "application/json; charset=utf-8", body: body, on: connection)
+                }
+            }
+        case "/diagnostics/transcript":
+            guard let transcriptProvider else {
+                send(status: 503, contentType: "text/plain; charset=utf-8", body: "transcript snapshot is unavailable\n", on: connection)
+                return
+            }
+            Task { @MainActor in
+                let body = transcriptProvider()
+                self.queue.async {
+                    self.send(status: 200, contentType: "application/json; charset=utf-8", body: body, on: connection)
+                }
+            }
+        case "/diagnostics/screenshot":
+            guard let screenshotProvider else {
+                send(status: 503, contentType: "text/plain; charset=utf-8", body: "screenshot is unavailable\n", on: connection)
+                return
+            }
+            Task { @MainActor in
+                let data = screenshotProvider()
+                self.queue.async {
+                    guard let data else {
+                        self.send(status: 503, contentType: "text/plain; charset=utf-8", body: "screenshot capture failed\n", on: connection)
+                        return
+                    }
+                    self.send(status: 200, contentType: "image/png", data: data, on: connection)
+                }
+            }
         default:
             send(status: 404, contentType: "text/plain; charset=utf-8", body: "not found\n", on: connection)
         }
@@ -230,19 +292,37 @@ final class DiagnosticsHTTPGateway: @unchecked Sendable {
         extraHeaders: [String: String] = [:],
         on connection: NWConnection
     ) {
+        send(
+            status: status,
+            contentType: contentType,
+            data: Data(body.utf8),
+            extraHeaders: extraHeaders,
+            on: connection
+        )
+    }
+
+    private func send(
+        status: Int,
+        contentType: String,
+        data: Data,
+        extraHeaders: [String: String] = [:],
+        on connection: NWConnection
+    ) {
         let reason = Self.reasonPhrase(for: status)
         var headers = [
             "HTTP/1.1 \(status) \(reason)",
             "Content-Type: \(contentType)",
-            "Content-Length: \(body.utf8.count)",
+            "Content-Length: \(data.count)",
             "Cache-Control: no-store",
             "Connection: close"
         ]
         for (key, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
             headers.append("\(key): \(value)")
         }
-        let response = headers.joined(separator: "\r\n") + "\r\n\r\n" + body
-        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+        let head = headers.joined(separator: "\r\n") + "\r\n\r\n"
+        var response = Data(head.utf8)
+        response.append(data)
+        connection.send(content: response, completion: .contentProcessed { _ in
             connection.cancel()
         })
     }
