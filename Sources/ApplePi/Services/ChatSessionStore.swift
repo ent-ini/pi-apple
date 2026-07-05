@@ -15,8 +15,9 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published private(set) var events: [SessionEvent] = []
     @Published private(set) var statusMessage: String = "" {
         didSet {
-            guard !statusMessage.isEmpty else { return }
-            DiagnosticsLogBuffer.shared.append(level: "info", category: "session.status", message: statusMessage, metadata: ["session": title])
+            guard !statusMessage.isEmpty,
+                  oldValue != statusMessage else { return }
+            DiagnosticsLogBuffer.shared.append(level: "info", category: "session.status", message: statusMessage, metadata: ["session": title, "sessionID": sessionID ?? ""])
         }
     }
     @Published private(set) var isLoading: Bool = false
@@ -26,8 +27,18 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published private(set) var historyRevision: Int = 0
     @Published private(set) var runtimeState: SessionRuntimeState?
     @Published private(set) var availableModels: [PiModelOption] = []
-    @Published private(set) var hasEarlierHistory: Bool = false
-    @Published private(set) var isLoadingEarlierHistory: Bool = false
+    @Published private(set) var hasEarlierHistory: Bool = false {
+        didSet {
+            guard oldValue != hasEarlierHistory else { return }
+            logHistoryStateChange("hasEarlierHistory changed", extra: ["value": String(hasEarlierHistory)])
+        }
+    }
+    @Published private(set) var isLoadingEarlierHistory: Bool = false {
+        didSet {
+            guard oldValue != isLoadingEarlierHistory else { return }
+            logHistoryStateChange("isLoadingEarlierHistory changed", extra: ["value": String(isLoadingEarlierHistory)])
+        }
+    }
     @Published private(set) var isAwaitingTurnCommit: Bool = false
     @Published private(set) var canAcceptSteering: Bool = false
     @Published var draftText: String = ""
@@ -103,6 +114,20 @@ final class ChatSession: ObservableObject, Identifiable {
 
     var currentSendGeneration: Int {
         sendGeneration
+    }
+
+    private func logHistoryStateChange(_ message: String, extra: [String: String] = [:]) {
+        var metadata: [String: String] = [
+            "session": title,
+            "sessionID": sessionID ?? "",
+            "firstLine": String(firstPersistedLineIndex),
+            "lastLine": String(lastPersistedLineIndex),
+            "persistedEvents": String(persistedEvents.count)
+        ]
+        for (key, value) in extra {
+            metadata[key] = value
+        }
+        DiagnosticsLogBuffer.shared.append(level: "debug", category: "session.history", message: message, metadata: metadata)
     }
 
     /// True while a send task is associated with this session. The
@@ -452,6 +477,19 @@ final class ChatSession: ObservableObject, Identifiable {
             let pageStartsAfterVisibleWindow = previousFirstLineIndex.map { previousFirstLine in
                 page.firstLine.map { $0 > previousFirstLine } ?? false
             } ?? false
+            DiagnosticsLogBuffer.shared.append(
+                level: pageStartsAfterVisibleWindow ? "debug" : "info",
+                category: "session.history",
+                message: pageStartsAfterVisibleWindow ? "Ignored delta hasMoreBefore for already-loaded history" : "Page exposed earlier history",
+                metadata: [
+                    "session": title,
+                    "sessionID": sessionID ?? "",
+                    "previousFirstLine": previousFirstLineIndex.map(String.init) ?? "",
+                    "pageFirstLine": page.firstLine.map(String.init) ?? "",
+                    "pageLastLine": page.lastLine.map(String.init) ?? "",
+                    "events": String(page.events.count)
+                ]
+            )
             if !pageStartsAfterVisibleWindow {
                 hasEarlierHistory = true
             }
@@ -471,6 +509,7 @@ final class ChatSession: ObservableObject, Identifiable {
         }
 
         let anchorEventID = preserveVisiblePosition ? persistedEvents.first?.id : nil
+        logHistoryStateChange("Loading earlier history", extra: ["before": String(before), "limit": String(limit), "preserveVisiblePosition": String(preserveVisiblePosition)])
         isLoadingEarlierHistory = true
         loadError = nil
 
@@ -481,12 +520,23 @@ final class ChatSession: ObservableObject, Identifiable {
                     guard let self else { return }
                     defer { self.isLoadingEarlierHistory = false }
                     guard self.firstPersistedLineIndex == before else { return }
+                    self.logHistoryStateChange(
+                        "Earlier history page loaded",
+                        extra: [
+                            "events": String(page.events.count),
+                            "firstLine": page.firstLine.map(String.init) ?? "",
+                            "lastLine": page.lastLine.map(String.init) ?? "",
+                            "hasMoreBefore": String(page.hasMoreBefore),
+                            "hasMoreAfter": String(page.hasMoreAfter)
+                        ]
+                    )
                     self.prependPersistedPage(page, anchorEventID: anchorEventID)
                 }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
                     self.isLoadingEarlierHistory = false
+                    self.logHistoryStateChange("Earlier history load failed", extra: ["error": error.localizedDescription])
                     self.loadError = error.localizedDescription
                     self.statusMessage = error.localizedDescription
                 }
@@ -516,6 +566,12 @@ final class ChatSession: ObservableObject, Identifiable {
 
         pendingHistoryAnchorEventID = nil
 
+        DiagnosticsLogBuffer.shared.append(
+            level: "info",
+            category: "session.reload",
+            message: "Session reload started",
+            metadata: ["session": title, "sessionID": sessionID ?? "", "force": String(force), "path": sessionPath ?? ""]
+        )
         isLoading = true
         loadError = nil
         loadTask?.cancel()
@@ -546,11 +602,26 @@ final class ChatSession: ObservableObject, Identifiable {
                 updateTitleFromSessionMetadata(in: page.events)
                 reconcileTransientEvents(with: persistedEvents)
                 rebuildEvents()
+                DiagnosticsLogBuffer.shared.append(
+                    level: "info",
+                    category: "session.reload",
+                    message: "Session reload loaded page",
+                    metadata: [
+                        "session": title,
+                        "sessionID": sessionID ?? "",
+                        "events": String(page.events.count),
+                        "firstLine": page.firstLine.map(String.init) ?? "",
+                        "lastLine": page.lastLine.map(String.init) ?? "",
+                        "hasMoreBefore": String(page.hasMoreBefore),
+                        "hasMoreAfter": String(page.hasMoreAfter)
+                    ]
+                )
                 statusMessage = page.events.isEmpty ? "Session is empty." : "\(page.events.count) events"
                 hasLoadedOnce = true
                 lastLoadedModificationDate = modificationDate
                 finishLoad(completionGeneration: completionGeneration)
             case .failed(let message):
+                DiagnosticsLogBuffer.shared.append(level: "error", category: "session.reload", message: "Session reload failed", metadata: ["session": title, "sessionID": sessionID ?? "", "error": message])
                 loadError = message
                 statusMessage = "Failed to read session: \(message)"
                 finishLoad(completionGeneration: completionGeneration)

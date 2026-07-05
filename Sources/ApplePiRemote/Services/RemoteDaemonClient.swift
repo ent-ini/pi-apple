@@ -42,6 +42,8 @@ public struct RemoteDaemonClient: Sendable {
                 return
             }
 
+            let startedAt = Date()
+            Self.logHTTPStart(request, category: "remote.catalog-sse")
             let worker = Task {
                 do {
                     let (bytes, response) = try await Self.liveSession.bytes(for: request)
@@ -55,8 +57,14 @@ public struct RemoteDaemonClient: Sendable {
                         }
                         let message = String(data: bodyData, encoding: .utf8)?
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                        throw RemoteDaemonError.requestFailed(status: http.statusCode, body: message)
+                        let error = RemoteDaemonError.requestFailed(status: http.statusCode, body: message)
+                        Self.logHTTPFailure(request, error: error, status: http.statusCode, body: message, startedAt: startedAt, category: "remote.catalog-sse")
+                        throw error
                     }
+                    var connectMetadata = Self.diagnosticMetadata(for: request)
+                    connectMetadata["status"] = String(http.statusCode)
+                    connectMetadata["connectMs"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+                    RemoteDiagnostics.log(level: "info", category: "remote.catalog-sse", message: "Catalog SSE connected", metadata: connectMetadata)
 
                     let parser = SSECatalogEventParser()
                     let decoder = Self.makeCatalogDecoder()
@@ -91,12 +99,15 @@ public struct RemoteDaemonClient: Sendable {
                             continuation.yield(.unknown(event.event, event.data))
                         }
                     }
+                    RemoteDiagnostics.log(level: "info", category: "remote.catalog-sse", message: "Catalog SSE finished", metadata: Self.diagnosticMetadata(for: request))
                     continuation.finish()
                 } catch {
+                    Self.logHTTPFailure(request, error: error, startedAt: startedAt, category: "remote.catalog-sse")
                     continuation.finish(throwing: error)
                 }
             }
             continuation.onTermination = { _ in
+                RemoteDiagnostics.log(level: "debug", category: "remote.catalog-sse", message: "Catalog SSE terminated", metadata: Self.diagnosticMetadata(for: request))
                 worker.cancel()
             }
         }
@@ -135,6 +146,8 @@ public struct RemoteDaemonClient: Sendable {
                 return
             }
 
+            let startedAt = Date()
+            Self.logHTTPStart(request, category: "remote.session-sse")
             let worker = Task {
                 do {
                     let (bytes, response) = try await Self.liveSession.bytes(for: request)
@@ -148,8 +161,16 @@ public struct RemoteDaemonClient: Sendable {
                         }
                         let message = String(data: bodyData, encoding: .utf8)?
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                        throw RemoteDaemonError.requestFailed(status: http.statusCode, body: message)
+                        let error = RemoteDaemonError.requestFailed(status: http.statusCode, body: message)
+                        Self.logHTTPFailure(request, error: error, status: http.statusCode, body: message, startedAt: startedAt, category: "remote.session-sse")
+                        throw error
                     }
+                    var connectMetadata = Self.diagnosticMetadata(for: request)
+                    connectMetadata["status"] = String(http.statusCode)
+                    connectMetadata["connectMs"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+                    connectMetadata["sessionID"] = sessionID
+                    connectMetadata["after"] = String(after)
+                    RemoteDiagnostics.log(level: "info", category: "remote.session-sse", message: "Session SSE connected", metadata: connectMetadata)
 
                     let parser = SSECatalogEventParser()
                     let decoder = JSONDecoder()
@@ -167,6 +188,12 @@ public struct RemoteDaemonClient: Sendable {
                         }
                         let events = SessionEventParser.decodeAll(line: record.raw, at: record.line)
                         guard !events.isEmpty else { continue }
+                        RemoteDiagnostics.log(
+                            level: "debug",
+                            category: "remote.session-sse.event",
+                            message: "Received session SSE event",
+                            metadata: ["sessionID": sessionID, "line": String(record.line), "decodedEvents": String(events.count)]
+                        )
                         continuation.yield(
                             SessionEventsPage(
                                 events: events,
@@ -177,12 +204,15 @@ public struct RemoteDaemonClient: Sendable {
                             )
                         )
                     }
+                    RemoteDiagnostics.log(level: "info", category: "remote.session-sse", message: "Session SSE finished", metadata: ["sessionID": sessionID, "after": String(after)])
                     continuation.finish()
                 } catch {
+                    Self.logHTTPFailure(request, error: error, startedAt: startedAt, category: "remote.session-sse")
                     continuation.finish(throwing: error)
                 }
             }
             continuation.onTermination = { _ in
+                RemoteDiagnostics.log(level: "debug", category: "remote.session-sse", message: "Session SSE terminated", metadata: ["sessionID": sessionID, "after": String(after)])
                 worker.cancel()
             }
         }
@@ -587,20 +617,33 @@ public struct RemoteDaemonClient: Sendable {
             accept: "application/json"
         )
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RemoteDaemonError.invalidResponse
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
-        }
-
-        let decoder = Self.makeCatalogDecoder()
+        let startedAt = Date()
+        Self.logHTTPStart(request)
         do {
-            return try decoder.decode(Response.self, from: data)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw RemoteDaemonError.invalidResponse
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let error = RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
+                Self.logHTTPFailure(request, error: error, status: httpResponse.statusCode, body: message, startedAt: startedAt)
+                throw error
+            }
+
+            let decoder = Self.makeCatalogDecoder()
+            do {
+                let decoded = try decoder.decode(Response.self, from: data)
+                Self.logHTTPSuccess(request, status: httpResponse.statusCode, startedAt: startedAt)
+                return decoded
+            } catch {
+                let wrapped = RemoteDaemonError.decodingFailed(error.localizedDescription)
+                Self.logHTTPFailure(request, error: wrapped, status: httpResponse.statusCode, startedAt: startedAt)
+                throw wrapped
+            }
         } catch {
-            throw RemoteDaemonError.decodingFailed(error.localizedDescription)
+            Self.logHTTPFailure(request, error: error, startedAt: startedAt)
+            throw error
         }
     }
 
@@ -623,20 +666,33 @@ public struct RemoteDaemonClient: Sendable {
             accept: accept
         )
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RemoteDaemonError.invalidResponse
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
-        }
-
-        let decoder = Self.makeCatalogDecoder()
+        let startedAt = Date()
+        Self.logHTTPStart(request)
         do {
-            return try decoder.decode(Response.self, from: data)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw RemoteDaemonError.invalidResponse
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let error = RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
+                Self.logHTTPFailure(request, error: error, status: httpResponse.statusCode, body: message, startedAt: startedAt)
+                throw error
+            }
+
+            let decoder = Self.makeCatalogDecoder()
+            do {
+                let decoded = try decoder.decode(Response.self, from: data)
+                Self.logHTTPSuccess(request, status: httpResponse.statusCode, startedAt: startedAt)
+                return decoded
+            } catch {
+                let wrapped = RemoteDaemonError.decodingFailed(error.localizedDescription)
+                Self.logHTTPFailure(request, error: wrapped, status: httpResponse.statusCode, startedAt: startedAt)
+                throw wrapped
+            }
         } catch {
-            throw RemoteDaemonError.decodingFailed(error.localizedDescription)
+            Self.logHTTPFailure(request, error: error, startedAt: startedAt)
+            throw error
         }
     }
 
@@ -657,33 +713,65 @@ public struct RemoteDaemonClient: Sendable {
             accept: "application/x-ndjson"
         )
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RemoteDaemonError.invalidResponse
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            var bodyData = Data()
-            for try await byte in bytes {
-                bodyData.append(byte)
+        let startedAt = Date()
+        Self.logHTTPStart(request, category: "remote.turn-stream")
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw RemoteDaemonError.invalidResponse
             }
-            let message = String(data: bodyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
-        }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                var bodyData = Data()
+                for try await byte in bytes {
+                    bodyData.append(byte)
+                }
+                let message = String(data: bodyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let error = RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
+                Self.logHTTPFailure(request, error: error, status: httpResponse.statusCode, body: message, startedAt: startedAt, category: "remote.turn-stream")
+                throw error
+            }
 
-        for try await line in bytes.lines {
-            if let event = PiTurnStreamParser.parseLine(line) {
-                await onEvent(event)
-                switch event {
-                case .streamError(let message):
-                    throw RemoteDaemonError.requestFailed(status: 0, body: message)
-                case .outputComplete:
-                    return
-                case .turnEnd, .agentEnd, .abort:
-                    continue
-                case .sessionBound, .sessionHeader, .sessionEvents:
-                    break
+            var eventCount = 0
+            for try await line in bytes.lines {
+                if let event = PiTurnStreamParser.parseLine(line) {
+                    eventCount += 1
+                    RemoteDiagnostics.log(
+                        level: "debug",
+                        category: "remote.turn-stream.event",
+                        message: "Received turn stream event",
+                        metadata: [
+                            "type": Self.turnStreamEventType(event),
+                            "count": String(eventCount)
+                        ]
+                    )
+                    await onEvent(event)
+                    switch event {
+                    case .streamError(let message):
+                        let error = RemoteDaemonError.requestFailed(status: 0, body: message)
+                        Self.logHTTPFailure(request, error: error, body: message, startedAt: startedAt, category: "remote.turn-stream")
+                        throw error
+                    case .outputComplete:
+                        var metadata = Self.diagnosticMetadata(for: request)
+                        metadata["status"] = String(httpResponse.statusCode)
+                        metadata["durationMs"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+                        metadata["events"] = String(eventCount)
+                        RemoteDiagnostics.log(level: "info", category: "remote.turn-stream", message: "Turn stream completed", metadata: metadata)
+                        return
+                    case .turnEnd, .agentEnd, .abort:
+                        continue
+                    case .sessionBound, .sessionHeader, .sessionEvents:
+                        break
+                    }
                 }
             }
+            var metadata = Self.diagnosticMetadata(for: request)
+            metadata["status"] = String(httpResponse.statusCode)
+            metadata["durationMs"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+            metadata["events"] = String(eventCount)
+            RemoteDiagnostics.log(level: "warn", category: "remote.turn-stream", message: "Turn stream ended without output_complete", metadata: metadata)
+        } catch {
+            Self.logHTTPFailure(request, error: error, startedAt: startedAt, category: "remote.turn-stream")
+            throw error
         }
     }
 
@@ -759,6 +847,80 @@ public struct RemoteDaemonClient: Sendable {
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
+    }
+
+    private static func turnStreamEventType(_ event: PiTurnStreamEvent) -> String {
+        switch event {
+        case .sessionBound: return "session_bound"
+        case .sessionHeader: return "session_header"
+        case .sessionEvents: return "session_events"
+        case .turnEnd: return "turn_end"
+        case .agentEnd: return "agent_end"
+        case .abort: return "abort"
+        case .streamError: return "stream_error"
+        case .outputComplete: return "output_complete"
+        }
+    }
+
+    private static func logHTTPStart(_ request: URLRequest, category: String = "remote.http") {
+        RemoteDiagnostics.log(
+            level: "debug",
+            category: category,
+            message: "HTTP request started",
+            metadata: diagnosticMetadata(for: request)
+        )
+    }
+
+    private static func logHTTPSuccess(_ request: URLRequest, status: Int, startedAt: Date, category: String = "remote.http") {
+        var metadata = diagnosticMetadata(for: request)
+        metadata["status"] = String(status)
+        metadata["durationMs"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+        RemoteDiagnostics.log(
+            level: "debug",
+            category: category,
+            message: "HTTP request completed",
+            metadata: metadata
+        )
+    }
+
+    private static func logHTTPFailure(
+        _ request: URLRequest,
+        error: Error,
+        status: Int? = nil,
+        body: String? = nil,
+        startedAt: Date,
+        category: String = "remote.http"
+    ) {
+        var metadata = diagnosticMetadata(for: request)
+        metadata["durationMs"] = String(Int(Date().timeIntervalSince(startedAt) * 1000))
+        if let status { metadata["status"] = String(status) }
+        if let body { metadata["body"] = truncated(body) }
+        metadata["error"] = truncated(error.localizedDescription)
+        RemoteDiagnostics.log(
+            level: "warn",
+            category: category,
+            message: "HTTP request failed",
+            metadata: metadata
+        )
+    }
+
+    private static func diagnosticMetadata(for request: URLRequest) -> [String: String] {
+        var metadata: [String: String] = [
+            "method": request.httpMethod ?? "GET"
+        ]
+        if let url = request.url {
+            metadata["host"] = url.host ?? ""
+            metadata["path"] = url.path
+            if let query = url.query, !query.isEmpty {
+                metadata["query"] = query
+            }
+        }
+        return metadata
+    }
+
+    private static func truncated(_ value: String, limit: Int = 500) -> String {
+        if value.count <= limit { return value }
+        return String(value.prefix(limit)) + "…"
     }
 
     private static func fileNameFromContentDisposition(_ value: String?) -> String? {

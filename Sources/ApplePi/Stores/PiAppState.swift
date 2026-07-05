@@ -57,7 +57,8 @@ final class PiAppState: ObservableObject {
     @Published private(set) var sessionSearchFocusRequestID = 0
     @Published var statusMessage = "Ready" {
         didSet {
-            guard !isLoadingPersistedState else { return }
+            guard !isLoadingPersistedState,
+                  oldValue != statusMessage else { return }
             DiagnosticsLogBuffer.shared.append(level: "info", category: "app.status", message: statusMessage)
         }
     }
@@ -184,6 +185,14 @@ final class PiAppState: ObservableObject {
         loadAvailableModelsCache()
         loadDiagnosticsGatewayPreferences()
         isLoadingPersistedState = false
+        RemoteDiagnostics.sink = { event in
+            DiagnosticsLogBuffer.shared.append(
+                level: event.level,
+                category: event.category,
+                message: event.message,
+                metadata: event.metadata
+            )
+        }
         DiagnosticsLogBuffer.shared.append(level: "info", category: "app.lifecycle", message: "pi-app started")
 
         chatWorkspace.onSessionExit = { [weak self] in
@@ -939,6 +948,18 @@ final class PiAppState: ObservableObject {
             return false
         }
 
+        DiagnosticsLogBuffer.shared.append(
+            level: "info",
+            category: "send.lifecycle",
+            message: "Send accepted",
+            metadata: [
+                "sessionID": session.sessionID ?? "",
+                "sessionKey": session.key,
+                "title": session.title,
+                "attachments": String(attachments.count),
+                "promptChars": String(effectivePrompt.count)
+            ]
+        )
         session.beginSending(prompt: taggedPrompt, attachments: attachments)
         let sendGeneration = session.currentSendGeneration
         let initialAliases = sessionAliases(for: session)
@@ -984,6 +1005,14 @@ final class PiAppState: ObservableObject {
         case success
         case cancelled
         case failure(String)
+
+        var diagnosticsName: String {
+            switch self {
+            case .success: return "success"
+            case .cancelled: return "cancelled"
+            case .failure: return "failure"
+            }
+        }
     }
 
     /// Apply the outcome of a send. Runs on the main actor; silently
@@ -1005,6 +1034,17 @@ final class PiAppState: ObservableObject {
         guard let session,
               session.currentSendGeneration == sendGeneration else { return }
         appState?.flushPendingTurnStreamEvents(for: session, generation: sendGeneration)
+        DiagnosticsLogBuffer.shared.append(
+            level: "info",
+            category: "send.lifecycle",
+            message: "Send completed",
+            metadata: [
+                "outcome": outcome.diagnosticsName,
+                "sessionID": session.sessionID ?? "",
+                "title": session.title,
+                "generation": String(sendGeneration)
+            ]
+        )
         switch outcome {
         case .success:
             session.finishSendingAndReload()
@@ -1043,6 +1083,18 @@ final class PiAppState: ObservableObject {
         attachments: [ChatAttachment],
         sendGeneration: Int
     ) async -> SendOutcome {
+        let startedAt = Date()
+        DiagnosticsLogBuffer.shared.append(
+            level: "info",
+            category: "send.remote",
+            message: "Remote turn started",
+            metadata: [
+                "sessionID": session?.sessionID ?? "",
+                "title": session?.title ?? "",
+                "generation": String(sendGeneration),
+                "attachments": String(attachments.count)
+            ]
+        )
         do {
             let daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments)
             if let sessionID = session?.sessionID?.nilIfBlank {
@@ -1079,10 +1131,28 @@ final class PiAppState: ObservableObject {
             } else {
                 throw RemoteDaemonError.requestFailed(status: 400, body: "Session is missing an ID.")
             }
+            DiagnosticsLogBuffer.shared.append(
+                level: "info",
+                category: "send.remote",
+                message: "Remote turn finished",
+                metadata: ["generation": String(sendGeneration), "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000))]
+            )
             return .success
         } catch is CancellationError {
+            DiagnosticsLogBuffer.shared.append(
+                level: "info",
+                category: "send.remote",
+                message: "Remote turn cancelled",
+                metadata: ["generation": String(sendGeneration), "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000))]
+            )
             return .cancelled
         } catch {
+            DiagnosticsLogBuffer.shared.append(
+                level: "error",
+                category: "send.remote",
+                message: "Remote turn failed",
+                metadata: ["generation": String(sendGeneration), "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)), "error": error.localizedDescription]
+            )
             return .failure(error.localizedDescription)
         }
     }
@@ -1964,6 +2034,12 @@ final class PiAppState: ObservableObject {
         // model/thinking chip is never blank while the stream warms up.
         refreshSessionRuntime(for: session)
 
+        DiagnosticsLogBuffer.shared.append(
+            level: "info",
+            category: "session.stream",
+            message: "Restarting selected session stream",
+            metadata: ["sessionID": sessionID, "after": String(session.lastPersistedLineIndex), "title": session.title]
+        )
         let streamHost = host
         let selectedTabID = session.id
         selectedSessionStreamTask = Task { [weak self] in
@@ -2007,6 +2083,12 @@ final class PiAppState: ObservableObject {
             }
 
             let after = session.lastPersistedLineIndex
+            DiagnosticsLogBuffer.shared.append(
+                level: "debug",
+                category: "session.stream",
+                message: "Opening selected session stream",
+                metadata: ["sessionID": sessionID, "after": String(after)]
+            )
             let stream = client.streamSessionEventPages(
                 host: streamHost,
                 sessionID: sessionID,
@@ -2024,6 +2106,17 @@ final class PiAppState: ObservableObject {
                           currentSession.sessionID?.nilIfBlank == sessionID else {
                         return
                     }
+                    DiagnosticsLogBuffer.shared.append(
+                        level: "debug",
+                        category: "session.stream",
+                        message: "Selected session stream page received",
+                        metadata: [
+                            "sessionID": sessionID,
+                            "events": String(page.events.count),
+                            "firstLine": page.firstLine.map(String.init) ?? "",
+                            "lastLine": page.lastLine.map(String.init) ?? ""
+                        ]
+                    )
                     enqueueSessionStreamPage(page, to: currentSession, sessionID: sessionID)
                 }
                 isSelectedSessionStreamConnected = false
@@ -2039,6 +2132,12 @@ final class PiAppState: ObservableObject {
                 if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
                     return
                 }
+                DiagnosticsLogBuffer.shared.append(
+                    level: "warn",
+                    category: "session.stream",
+                    message: "Selected session stream lost",
+                    metadata: ["sessionID": sessionID, "error": error.localizedDescription, "receivedEvent": String(receivedEvent)]
+                )
                 if !receivedEvent {
                     statusMessage = "Live session stream lost: \(error.localizedDescription). Retrying…"
                 }
@@ -2188,6 +2287,12 @@ final class PiAppState: ObservableObject {
         }
 
         let after = session.lastPersistedLineIndex
+        DiagnosticsLogBuffer.shared.append(
+            level: "debug",
+            category: "session.catchup",
+            message: "Sync selected remote session delta",
+            metadata: ["sessionID": sessionID, "after": String(after), "force": String(force)]
+        )
         guard after >= 0 else {
             session.loadFromDisk(force: true)
             return
@@ -2211,9 +2316,23 @@ final class PiAppState: ObservableObject {
                   self.chatWorkspace.selectedTab?.id == selectedTabID else {
                 return
             }
+            DiagnosticsLogBuffer.shared.append(
+                level: "debug",
+                category: "session.catchup",
+                message: "Delta loaded",
+                metadata: [
+                    "sessionID": sessionID,
+                    "events": String(delta.events.count),
+                    "firstLine": delta.firstLine.map(String.init) ?? "",
+                    "lastLine": delta.lastLine.map(String.init) ?? "",
+                    "hasMoreBefore": String(delta.hasMoreBefore),
+                    "hasMoreAfter": String(delta.hasMoreAfter)
+                ]
+            )
             if let firstLine = delta.firstLine,
                !delta.events.isEmpty,
                firstLine <= after {
+                DiagnosticsLogBuffer.shared.append(level: "warn", category: "session.catchup", message: "Delta overlapped visible window; forcing reload", metadata: ["sessionID": sessionID, "firstLine": String(firstLine), "after": String(after)])
                 session.loadFromDisk(force: true)
                 return
             }
@@ -2228,6 +2347,7 @@ final class PiAppState: ObservableObject {
             )
             applyCachedAvailableModels(to: session)
         } catch {
+            DiagnosticsLogBuffer.shared.append(level: "warn", category: "session.catchup", message: "Delta sync failed", metadata: ["sessionID": sessionID, "error": error.localizedDescription])
             // Best-effort background sync: keep the current transcript and
             // let catalog polling / manual reload recover.
         }
