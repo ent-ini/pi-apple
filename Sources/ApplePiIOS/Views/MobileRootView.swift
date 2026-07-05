@@ -4,19 +4,19 @@ import ApplePiCore
 struct MobileRootView: View {
     @EnvironmentObject private var appState: MobilePiAppState
     @State private var showsSettings = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    @State private var showsChat = false
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationStack {
             MobileSessionListView {
-                columnVisibility = .detailOnly
+                showsChat = true
             }
             .navigationTitle("pi-app")
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
                         appState.startNewSession()
-                        columnVisibility = .detailOnly
+                        showsChat = true
                     } label: {
                         Label("New", systemImage: "square.and.pencil")
                     }
@@ -35,8 +35,9 @@ struct MobileRootView: View {
                     }
                 }
             }
-        } detail: {
-            MobileSessionDetailView()
+            .navigationDestination(isPresented: $showsChat) {
+                MobileSessionDetailView()
+            }
         }
         .sheet(isPresented: $showsSettings) {
             NavigationStack {
