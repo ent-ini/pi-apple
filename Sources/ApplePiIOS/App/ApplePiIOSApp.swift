@@ -410,6 +410,7 @@ final class MobilePiAppState: ObservableObject {
         guard !page.events.isEmpty || page.lastLine != nil else { return }
         for event in page.events {
             selectedPersistedEventIDs.insert(event.id)
+            removeTransientEvents(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: true)
         }
         if let lastLine = page.lastLine {
@@ -437,6 +438,55 @@ final class MobilePiAppState: ObservableObject {
         } else {
             selectedEvents.append(event)
         }
+    }
+
+    private func removeTransientEvents(matchingPersisted persistedEvent: SessionEvent) {
+        selectedEvents.removeAll { existing in
+            !selectedPersistedEventIDs.contains(existing.id)
+                && transientEvent(existing, matchesPersistedReplacement: persistedEvent)
+        }
+    }
+
+    private func transientEvent(_ transient: SessionEvent, matchesPersistedReplacement persisted: SessionEvent) -> Bool {
+        switch (transient, persisted) {
+        case (.message(let transientMessage, _), .message(let persistedMessage, _)):
+            guard transientMessage.role == persistedMessage.role else { return false }
+            if transientMessage.id == persistedMessage.id { return true }
+            let transientSignature = messageSignature(for: transientMessage)
+            let persistedSignature = messageSignature(for: persistedMessage)
+            if !transientSignature.isEmpty, transientSignature == persistedSignature {
+                return true
+            }
+            return transientMessage.content == persistedMessage.content
+        case (.toolCall(let transientCall, _), .toolCall(let persistedCall, _)):
+            return transientCall.id == persistedCall.id
+        case (.toolResult(let transientResult, _), .toolResult(let persistedResult, _)):
+            return transientResult.id == persistedResult.id
+                || (!transientResult.callId.isEmpty && transientResult.callId == persistedResult.callId)
+        default:
+            return false
+        }
+    }
+
+    private func messageSignature(for message: Message) -> String {
+        var parts: [String] = []
+        var imageCount = 0
+        for block in message.content {
+            switch block {
+            case .text(let text):
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { parts.append(trimmed) }
+            case .thinking(let text, _):
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { parts.append("[thinking]\(trimmed)") }
+            case .image:
+                imageCount += 1
+            }
+        }
+        if imageCount > 0 {
+            parts.append("[images:\(imageCount)]")
+        }
+        return parts.joined(separator: "\n")
     }
 
     private func sortSelectedEventsForDisplay() {

@@ -95,6 +95,10 @@ private struct MobileSessionListView: View {
                                     if let model = session.latestModel {
                                         Text(model)
                                     }
+                                    if session.isGenerating || (appState.isSending && appState.selectedSession?.id == session.id) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
                                 }
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
