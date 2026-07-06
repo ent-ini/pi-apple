@@ -37,7 +37,13 @@ final class MobilePiAppState: ObservableObject {
     @Published private(set) var isLoadingCatalog = false
     @Published private(set) var isLoadingSession = false
     @Published private(set) var isSending = false
+    @Published private(set) var selectedRuntime: SessionRuntimeState?
+    @Published private(set) var availableModels: [PiModelOption] = []
+    @Published private(set) var isLoadingRuntime = false
     @Published var draft = ""
+    @Published var sessionSearchText = ""
+
+    static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
 
     private let defaults: UserDefaults
     private let hostDefaultsKey = "ApplePiIOS.host"
@@ -76,6 +82,24 @@ final class MobilePiAppState: ObservableObject {
         selectedEvents.filter(\.isVisibleInTranscript)
     }
 
+    var filteredSessions: [PiSessionSummary] {
+        let query = sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return sessions }
+        return sessions.filter { session in
+            session.title.localizedCaseInsensitiveContains(query)
+                || session.subtitle.localizedCaseInsensitiveContains(query)
+                || (session.latestModel?.localizedCaseInsensitiveContains(query) ?? false)
+        }
+    }
+
+    var selectedModelDisplayName: String {
+        selectedRuntime?.modelDisplayName ?? selectedSession?.latestModel ?? "model"
+    }
+
+    var selectedThinkingLevel: String {
+        selectedRuntime?.thinkingLevel ?? "off"
+    }
+
     func loadInitialCatalogIfConfigured() async {
         guard isConfigured else { return }
         await reloadCatalog()
@@ -101,6 +125,10 @@ final class MobilePiAppState: ObservableObject {
         @unknown default:
             break
         }
+    }
+
+    func showStatus(_ message: String) {
+        statusMessage = message
     }
 
     func testConnection() async {
@@ -165,12 +193,15 @@ final class MobilePiAppState: ObservableObject {
 
     func selectSession(_ session: PiSessionSummary) async {
         selectedSession = session
+        selectedRuntime = nil
         resetSelectedTranscript()
         await reloadSelectedSession()
+        await refreshSelectedRuntimeAndModels()
     }
 
     func startNewSession() {
         selectedSession = nil
+        selectedRuntime = nil
         resetSelectedTranscript()
         stopSelectedSessionStream()
         statusMessage = "New session ready."
@@ -195,10 +226,75 @@ final class MobilePiAppState: ObservableObject {
             replaceSelectedTranscript(with: page)
             statusMessage = "Loaded session \(selectedSession.title)."
             startSelectedSessionStreamIfPossible()
+            Task { await refreshSelectedRuntimeAndModels() }
         } catch {
             guard self.selectedSession?.id == selectedSession.id else { return }
             statusMessage = error.localizedDescription
             startSelectedSessionStreamIfPossible()
+        }
+    }
+
+    func refreshSelectedRuntimeAndModels() async {
+        guard let sessionID = selectedSession?.id.nilIfBlank else {
+            selectedRuntime = nil
+            availableModels = []
+            return
+        }
+        isLoadingRuntime = true
+        defer { isLoadingRuntime = false }
+        do {
+            async let runtime = RemoteDaemonClient().loadSessionRuntime(
+                host: host,
+                sessionID: sessionID,
+                tokenOverride: daemonToken.nilIfBlank
+            )
+            async let models = RemoteDaemonClient().loadAvailableModels(
+                host: host,
+                sessionID: sessionID,
+                tokenOverride: daemonToken.nilIfBlank
+            )
+            let (loadedRuntime, loadedModels) = try await (runtime, models)
+            guard selectedSession?.id == sessionID else { return }
+            selectedRuntime = loadedRuntime
+            availableModels = loadedModels
+        } catch {
+            guard selectedSession?.id == sessionID else { return }
+            statusMessage = "Could not load runtime: \(error.localizedDescription)"
+        }
+    }
+
+    func setSelectedModel(_ model: PiModelOption) async {
+        guard let sessionID = selectedSession?.id.nilIfBlank else { return }
+        do {
+            let runtime = try await RemoteDaemonClient().setSessionModel(
+                host: host,
+                sessionID: sessionID,
+                provider: model.provider,
+                modelID: model.modelID,
+                tokenOverride: daemonToken.nilIfBlank
+            )
+            guard selectedSession?.id == sessionID else { return }
+            selectedRuntime = runtime
+            await reloadCatalog(quietly: true)
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func setSelectedThinkingLevel(_ level: String) async {
+        guard let sessionID = selectedSession?.id.nilIfBlank else { return }
+        do {
+            let runtime = try await RemoteDaemonClient().setSessionThinkingLevel(
+                host: host,
+                sessionID: sessionID,
+                level: level,
+                tokenOverride: daemonToken.nilIfBlank
+            )
+            guard selectedSession?.id == sessionID else { return }
+            selectedRuntime = runtime
+            await reloadCatalog(quietly: true)
+        } catch {
+            statusMessage = error.localizedDescription
         }
     }
 
@@ -240,7 +336,11 @@ final class MobilePiAppState: ObservableObject {
             upsertSession(session)
         case .sessionRemoved(let sessionId):
             removeSession(id: sessionId)
-        case .runtimeChanged, .unknown:
+        case .runtimeChanged(let sessionId, let runtime):
+            if selectedSession?.id == sessionId {
+                selectedRuntime = runtime
+            }
+        case .unknown:
             break
         }
     }
@@ -252,6 +352,7 @@ final class MobilePiAppState: ObservableObject {
                 bindSelectedSession(binding)
                 statusMessage = "Session: \(binding.title)"
                 startSelectedSessionStreamIfPossible()
+                Task { await refreshSelectedRuntimeAndModels() }
             case .sessionHeader(let meta):
                 if selectedSession == nil {
                     bindSelectedSession(

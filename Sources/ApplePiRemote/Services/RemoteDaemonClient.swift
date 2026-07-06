@@ -580,6 +580,49 @@ public struct RemoteDaemonClient: Sendable {
         }
     }
 
+    public func transcribeAudio(host: PiHostConfiguration, fileURL: URL, language: String = "ru", tokenOverride: String? = nil) async throws -> String {
+        let boundary = "ApplePiTranscribeBoundary-\(UUID().uuidString)"
+        var request = try makeRequest(
+            host: host,
+            path: "/transcribe",
+            method: "POST",
+            tokenOverride: tokenOverride,
+            accept: "application/json"
+        )
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let fileName = MultipartFilenameSanitizer.sanitize(fileURL.lastPathComponent, placeholder: "audio")
+        let fileData = try Data(contentsOf: fileURL)
+        request.httpBody = Self.makeTranscriptionMultipartBody(
+            fileName: fileName,
+            mimeType: Self.audioMimeType(for: fileURL),
+            fileData: fileData,
+            language: language,
+            boundary: boundary
+        )
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw RemoteDaemonError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
+        }
+        do {
+            let decoded = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
+            let text = decoded.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw RemoteDaemonError.decodingFailed("empty transcription")
+            }
+            return text
+        } catch let error as RemoteDaemonError {
+            throw error
+        } catch {
+            throw RemoteDaemonError.decodingFailed(error.localizedDescription)
+        }
+    }
+
     /// Builds the multipart body for `/uploads`. Exposed as a static
     /// helper so the test suite can pin the exact wire format (in
     /// particular the sanitised filename and the `Content-Disposition`
@@ -601,6 +644,38 @@ public struct RemoteDaemonClient: Sendable {
         body.append(fileData)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         return body
+    }
+
+    public static func makeTranscriptionMultipartBody(
+        fileName: String,
+        mimeType: String,
+        fileData: Data,
+        language: String,
+        boundary: String
+    ) -> Data {
+        var body = Data()
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"model\"\r\n\r\n".utf8))
+        body.append(Data("whisper-large-v3\r\n".utf8))
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"language\"\r\n\r\n".utf8))
+        body.append(Data("\(language)\r\n".utf8))
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".utf8))
+        body.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
+        body.append(fileData)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        return body
+    }
+
+    private static func audioMimeType(for fileURL: URL) -> String {
+        switch fileURL.pathExtension.lowercased() {
+        case "m4a": return "audio/m4a"
+        case "mp3": return "audio/mpeg"
+        case "wav": return "audio/wav"
+        case "ogg": return "audio/ogg"
+        default: return "application/octet-stream"
+        }
     }
 
     private func send<Response: Decodable>(
@@ -1119,6 +1194,10 @@ private struct HealthResponse: Decodable {
 
 private struct EmptyOKResponse: Decodable {
     let ok: Bool?
+}
+
+private struct TranscriptionResponse: Decodable {
+    let text: String
 }
 
 private struct CatalogResponse: Decodable {

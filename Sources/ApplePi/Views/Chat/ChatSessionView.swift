@@ -556,19 +556,15 @@ struct ChatSessionView: View {
 
     private func transcribeAudioAttachmentIfPossible(_ attachment: ChatAttachment) {
         guard attachment.kind == .audio else { return }
-        guard let apiKey = appState.groqAPIKey() else {
-            cleanupAttachments([attachment])
-            appState.statusMessage = "Save a Groq API key in Settings to enable voice transcription."
-            return
-        }
 
         let fileURL = attachment.fileURL
+        let host = appState.host
         isTranscribingAudio = true
         appState.statusMessage = "Transcribing voice note..."
         transcriptionTask?.cancel()
         transcriptionTask = Task {
             do {
-                let transcript = try await GroqTranscriptionClient().transcribeAudio(at: fileURL, apiKey: apiKey)
+                let transcript = try await RemoteDaemonClient().transcribeAudio(host: host, fileURL: fileURL)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     mergeTranscript(transcript)

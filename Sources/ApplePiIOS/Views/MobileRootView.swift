@@ -2,43 +2,24 @@ import SwiftUI
 import ApplePiCore
 
 struct MobileRootView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: MobilePiAppState
     @State private var showsSettings = false
     @State private var showsChat = false
 
     var body: some View {
         NavigationStack {
-            MobileSessionListView {
-                showsChat = true
-            }
-            .navigationTitle("pi-app")
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        appState.startNewSession()
-                        showsChat = true
-                    } label: {
-                        Label("New", systemImage: "square.and.pencil")
-                    }
-
-                    Button {
-                        Task { await appState.reloadCatalog() }
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(appState.isLoadingCatalog)
-
-                    Button {
-                        showsSettings = true
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
-                    }
-                }
-            }
+            MobileSessionListView(
+                showsSettings: $showsSettings,
+                onOpenDetail: { showsChat = true }
+            )
             .navigationDestination(isPresented: $showsChat) {
                 MobileSessionDetailView()
             }
+            .hiddenMobileNavigationBar()
         }
+        .tint(MobileTheme.accentColor)
+        .preferredColorScheme(colorScheme)
         .sheet(isPresented: $showsSettings) {
             NavigationStack {
                 MobileSettingsView()
@@ -63,119 +44,271 @@ struct MobileRootView: View {
 }
 
 private struct MobileSessionListView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: MobilePiAppState
+    @Binding var showsSettings: Bool
     let onOpenDetail: () -> Void
 
     var body: some View {
-        List(selection: selectedSessionBinding) {
-            if !appState.isConfigured {
-                ContentUnavailableView(
-                    "Remote API required",
-                    systemImage: "network",
-                    description: Text("Open settings and enter your pi-appd URL.")
-                )
-            } else if appState.isLoadingCatalog && appState.sessions.isEmpty {
-                ProgressView("Loading sessions…")
-            } else if appState.sessions.isEmpty {
-                ContentUnavailableView(
-                    "No sessions",
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text(appState.statusMessage)
-                )
-            } else {
-                Section("Sessions") {
-                    ForEach(appState.sessions) { session in
+        VStack(spacing: 0) {
+            topBar
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 10)
+
+            Divider().opacity(0.24)
+
+            content
+        }
+        .foregroundStyle(MobileTheme.textColor(for: colorScheme))
+        .background(MobileTheme.sidebarBackgroundColor(for: colorScheme).ignoresSafeArea())
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 8) {
+            MobileSearchField(text: $appState.sessionSearchText)
+
+            MobileIconButton(systemName: "square.and.pencil", help: "New session") {
+                appState.startNewSession()
+                onOpenDetail()
+            }
+
+            MobileIconButton(systemName: "arrow.clockwise", help: "Refresh sessions", isDisabled: appState.isLoadingCatalog) {
+                Task { await appState.reloadCatalog() }
+            }
+
+            MobileIconButton(systemName: "gearshape", help: "Settings") {
+                showsSettings = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if !appState.isConfigured {
+            ContentUnavailableView(
+                "Remote API required",
+                systemImage: "network",
+                description: Text("Open settings and enter your pi-appd URL.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if appState.isLoadingCatalog && appState.sessions.isEmpty {
+            ProgressView("Loading sessions…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if appState.filteredSessions.isEmpty {
+            ContentUnavailableView(
+                appState.sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No sessions" : "No matches",
+                systemImage: appState.sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "bubble.left.and.bubble.right" : "magnifyingglass",
+                description: Text(appState.sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? appState.statusMessage : appState.sessionSearchText)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(appState.filteredSessions) { session in
                         Button {
                             onOpenDetail()
                             Task { await appState.selectSession(session) }
                         } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(session.title)
-                                    .font(.headline)
-                                    .lineLimit(2)
-                                Text(session.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                HStack(spacing: 8) {
-                                    Label("\(session.messageCount)", systemImage: "text.bubble")
-                                    if let model = session.latestModel {
-                                        Text(model)
-                                    }
-                                    if session.isGenerating || (appState.isSending && appState.selectedSession?.id == session.id) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                    }
-                                }
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                            }
-                            .padding(.vertical, 4)
+                            MobileSessionRow(
+                                session: session,
+                                isSelected: appState.selectedSession?.id == session.id,
+                                isSending: session.isGenerating || (appState.isSending && appState.selectedSession?.id == session.id)
+                            )
                         }
+                        .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
             }
-        }
-        .overlay(alignment: .bottom) {
-            if !appState.statusMessage.isEmpty {
-                Text(appState.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .padding(8)
-                    .frame(maxWidth: .infinity)
-                    .background(.thinMaterial)
-            }
+            .scrollContentBackground(.hidden)
         }
     }
+}
 
-    private var selectedSessionBinding: Binding<String?> {
-        Binding(
-            get: { appState.selectedSession?.id },
-            set: { _ in }
-        )
+private struct MobileSessionRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let session: PiSessionSummary
+    let isSelected: Bool
+    let isSending: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(session.title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(MobileTheme.textColor(for: colorScheme))
+                        .lineLimit(1)
+
+                    HStack(spacing: 8) {
+                        Text(session.modifiedAt, style: .date)
+                        Label("\(session.messageCount)", systemImage: "text.bubble")
+                        if let model = session.latestModel {
+                            Text(model)
+                        }
+                    }
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                if isSending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(MobileTheme.accentColor)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(isSelected ? MobileTheme.controlTint(for: colorScheme, opacity: 0.14) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Divider()
+                .padding(.leading, 12)
+                .opacity(isSelected ? 0 : 0.28)
+        }
     }
 }
 
 private struct MobileSessionDetailView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: MobilePiAppState
 
     var body: some View {
         VStack(spacing: 0) {
+            chatTopBar
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+
+            Divider().opacity(0.24)
+
             if let session = appState.selectedSession {
                 transcript(for: session)
-                Divider()
-                composer
             } else {
                 ContentUnavailableView(
-                    "Select a session",
+                    "New session",
                     systemImage: "message",
-                    description: Text("Or type a prompt below to start a new remote session.")
+                    description: Text("Type a prompt below to start a remote session.")
                 )
-                Divider()
-                composer
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            composer
+        }
+        .foregroundStyle(MobileTheme.textColor(for: colorScheme))
+        .background(MobileTheme.mainBackgroundColor(for: colorScheme).ignoresSafeArea())
+        .hiddenMobileNavigationBar()
+        .task(id: appState.selectedSession?.id) {
+            await appState.refreshSelectedRuntimeAndModels()
+        }
+    }
+
+    private var chatTopBar: some View {
+        HStack(spacing: 8) {
+            MobileIconButton(systemName: "chevron.left", help: "Back") {
+                dismiss()
+            }
+
+            sessionTitleMenu
+
+            Spacer(minLength: 0)
+
+            if appState.isLoadingSession || appState.isLoadingRuntime {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(MobileTheme.accentColor)
+            }
+
+            MobileIconButton(systemName: "square.and.pencil", help: "New session") {
+                appState.startNewSession()
+            }
+
+            MobileIconButton(systemName: "arrow.clockwise", help: "Reload session", isDisabled: appState.selectedSession == nil || appState.isLoadingSession) {
+                Task { await appState.reloadSelectedSession() }
             }
         }
-        .navigationTitle(appState.selectedSession?.title ?? "New Session")
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if appState.isLoadingSession {
-                    ProgressView()
-                }
-                Button {
-                    appState.startNewSession()
+    }
+
+    private var sessionTitleMenu: some View {
+        Menu {
+            if appState.selectedSession == nil {
+                Text("No active session yet")
+            } else {
+                Menu {
+                    if groupedModels.isEmpty {
+                        Text("Loading models…")
+                    } else {
+                        ForEach(groupedModels) { group in
+                            Section(group.provider) {
+                                ForEach(group.models) { model in
+                                    Button {
+                                        Task { await appState.setSelectedModel(model) }
+                                    } label: {
+                                        if appState.selectedRuntime?.provider == model.provider,
+                                           appState.selectedRuntime?.modelID == model.modelID {
+                                            Label(model.shortLabel, systemImage: "checkmark")
+                                        } else {
+                                            Text(model.shortLabel)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } label: {
-                    Label("New", systemImage: "square.and.pencil")
+                    Label(appState.selectedModelDisplayName, systemImage: "cpu")
                 }
 
-                Button {
-                    Task { await appState.reloadSelectedSession() }
+                Menu {
+                    ForEach(MobilePiAppState.thinkingLevels, id: \.self) { level in
+                        Button {
+                            Task { await appState.setSelectedThinkingLevel(level) }
+                        } label: {
+                            if appState.selectedThinkingLevel == level {
+                                Label(level, systemImage: "checkmark")
+                            } else {
+                                Text(level)
+                            }
+                        }
+                    }
                 } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
+                    Label(appState.selectedThinkingLevel, systemImage: "brain")
                 }
-                .disabled(appState.selectedSession == nil || appState.isLoadingSession)
+
+                Divider()
+
+                Button("Refresh runtime") {
+                    Task { await appState.refreshSelectedRuntimeAndModels() }
+                }
             }
+        } label: {
+            HStack(spacing: 6) {
+                Text(appState.selectedSession?.title ?? "New Session")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .mobileBlobStyle(colorScheme: colorScheme)
         }
+        .buttonStyle(.plain)
+    }
+
+    private var groupedModels: [MobileModelGroup] {
+        Dictionary(grouping: appState.availableModels, by: \.provider)
+            .map { provider, models in
+                MobileModelGroup(
+                    provider: provider,
+                    models: models.sorted { $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending }
+                )
+            }
+            .sorted { $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending }
     }
 
     private func transcript(for session: PiSessionSummary) -> some View {
@@ -190,6 +323,7 @@ private struct MobileSessionDetailView: View {
                 }
                 .padding()
             }
+            .scrollContentBackground(.hidden)
             .overlay {
                 if appState.isLoadingSession && appState.selectedEvents.isEmpty {
                     ProgressView("Loading \(session.title)…")
@@ -205,20 +339,46 @@ private struct MobileSessionDetailView: View {
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        HStack(alignment: .bottom, spacing: 10) {
+            MobileComposerIconButton(systemName: "plus", isDisabled: true) {}
+
             TextField("Message pi…", text: $appState.draft, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
                 .lineLimit(1...5)
-            Button {
-                Task { await appState.sendDraft() }
-            } label: {
-                Image(systemName: "paperplane.fill")
+                .padding(.vertical, 8)
+                .foregroundStyle(MobileTheme.textColor(for: colorScheme))
+
+            MobileComposerIconButton(systemName: "mic.fill") {
+                appState.showStatus("Voice recording will use pi-appd transcription next.")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            MobileComposerIconButton(
+                systemName: "arrow.up",
+                isDisabled: appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ) {
+                Task { await appState.sendDraft() }
+            }
         }
-        .padding()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(MobileTheme.composerAreaBackgroundColor(for: colorScheme))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
     }
+}
+
+private struct MobileModelGroup: Identifiable {
+    let provider: String
+    let models: [PiModelOption]
+    var id: String { provider }
 }
 
 private enum MobileDisplayedRow: Identifiable, Hashable {
@@ -297,6 +457,7 @@ private struct MobileEventRow: View {
 }
 
 private struct MessageBubble: View {
+    @Environment(\.colorScheme) private var colorScheme
     let message: Message
 
     var body: some View {
@@ -350,8 +511,24 @@ private struct MessageBubble: View {
     private func bubbleSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
             .padding(12)
-            .background(message.role == .user ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12))
+            .background(bubbleBackground)
+            .foregroundStyle(bubbleTextColor)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var bubbleBackground: Color {
+        switch message.role {
+        case .user:
+            return MobileTheme.accentColor
+        case .assistant:
+            return MobileTheme.assistantMessageBackgroundColor(for: colorScheme)
+        case .system:
+            return MobileTheme.assistantMessageBackgroundColor(for: colorScheme).opacity(0.72)
+        }
+    }
+
+    private var bubbleTextColor: Color {
+        message.role == .user ? .black : MobileTheme.textColor(for: colorScheme)
     }
 
     private var visibleBlocks: [ContentBlock] {
@@ -431,6 +608,7 @@ private struct MobileThinkingSummaryView: View {
 }
 
 private struct ToolBlock: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let sections: [(label: String, text: String)]
     var isError = false
@@ -479,7 +657,7 @@ private struct ToolBlock: View {
             .background {
                 if isExpanded {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.secondary.opacity(0.08))
+                        .fill(MobileTheme.controlTint(for: colorScheme, opacity: 0.06))
                 }
             }
             Spacer(minLength: 32)
@@ -500,7 +678,7 @@ private struct ToolBlock: View {
                 .padding(8)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.secondary.opacity(0.08))
+                        .fill(MobileTheme.controlTint(for: colorScheme, opacity: 0.05))
                 )
         }
     }
@@ -542,21 +720,129 @@ private struct MobileSettingsView: View {
     }
 }
 
-private extension Message {
-    var plainText: String {
-        content.map { block in
-            switch block {
-            case .text(let value):
-                return value
-            case .thinking(let value, _):
-                return value
-            case .image(let path, let mime):
-                if let mime {
-                    return "[image: \(path), \(mime)]"
+private struct MobileSearchField: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search sessions", text: $text)
+                .textFieldStyle(.plain)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
                 }
-                return "[image: \(path)]"
+                .buttonStyle(.plain)
             }
         }
-        .joined(separator: "\n")
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(MobileTheme.controlTint(for: colorScheme, opacity: 0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+private struct MobileIconButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let systemName: String
+    var help: String = ""
+    var isDisabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(MobileTheme.accentColor.opacity(isDisabled ? 0.28 : 1))
+                .frame(width: 34, height: 34)
+                .background(MobileTheme.controlTint(for: colorScheme, opacity: 0.07))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .help(help)
+    }
+}
+
+private struct MobileComposerIconButton: View {
+    let systemName: String
+    var isDisabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(MobileTheme.accentColor.opacity(isDisabled ? 0.28 : 1))
+                .frame(width: 22, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+    }
+}
+
+private struct MobileBlobModifier: ViewModifier {
+    let colorScheme: ColorScheme
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(MobileTheme.controlTint(for: colorScheme, opacity: 0.07))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+private extension View {
+    func mobileBlobStyle(colorScheme: ColorScheme) -> some View {
+        modifier(MobileBlobModifier(colorScheme: colorScheme))
+    }
+
+    @ViewBuilder
+    func hiddenMobileNavigationBar() -> some View {
+        #if os(iOS)
+        toolbar(.hidden, for: .navigationBar)
+        #else
+        self
+        #endif
+    }
+}
+
+private enum MobileTheme {
+    static let accentColor = Color.yellow
+
+    static func mainBackgroundColor(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.055, green: 0.058, blue: 0.065) : Color(red: 0.965, green: 0.965, blue: 0.955)
+    }
+
+    static func sidebarBackgroundColor(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.078, green: 0.082, blue: 0.092) : Color(red: 0.91, green: 0.91, blue: 0.895)
+    }
+
+    static func composerAreaBackgroundColor(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.074, green: 0.078, blue: 0.088) : Color(red: 0.93, green: 0.93, blue: 0.92)
+    }
+
+    static func textColor(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .white : .black
+    }
+
+    static func assistantMessageBackgroundColor(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
+    }
+
+    static func controlTint(for colorScheme: ColorScheme, opacity: Double) -> Color {
+        (colorScheme == .dark ? Color.white : Color.black).opacity(opacity)
     }
 }

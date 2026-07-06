@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"log"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +37,7 @@ const (
 	maxAttachmentBytes        int64 = 32 << 20
 	maxImageAttachmentBytes   int64 = 10 << 20
 	maxDownloadFileBytes      int64 = 64 << 20
+	maxTranscriptionFileBytes int64 = 32 << 20
 	serverReadHeaderTimeout         = 5 * time.Second
 	serverIdleTimeout               = 60 * time.Second
 	rpcCommandTimeout               = 2 * time.Minute
@@ -299,6 +302,10 @@ type uploadResponse struct {
 	Size     int64  `json:"size,omitempty"`
 }
 
+type transcriptionResponse struct {
+	Text string `json:"text"`
+}
+
 type streamErrorRecord struct {
 	Type  string `json:"type"`
 	Error string `json:"error"`
@@ -462,6 +469,7 @@ func main() {
 	mux.HandleFunc("/files", srv.handleFiles)
 	mux.HandleFunc("/file", srv.handleFile)
 	mux.HandleFunc("/uploads", srv.handleUploads)
+	mux.HandleFunc("/transcribe", srv.handleTranscribe)
 
 	go srv.watchCatalog()
 
@@ -1667,6 +1675,131 @@ func (s *server) handleUploads(w http.ResponseWriter, r *http.Request) {
 		MimeType: header.Header.Get("Content-Type"),
 		Size:     size,
 	})
+}
+
+func (s *server) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	apiKey := strings.TrimSpace(os.Getenv("GROQ_API_KEY"))
+	if apiKey == "" {
+		writeError(w, http.StatusServiceUnavailable, "GROQ_API_KEY is not configured on pi-appd")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "multipart form is too large")
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file is required")
+		return
+	}
+	defer file.Close()
+
+	limitedFile := &io.LimitedReader{R: file, N: maxTranscriptionFileBytes + 1}
+	fileData, err := io.ReadAll(limitedFile)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if int64(len(fileData)) > maxTranscriptionFileBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "audio file is too large")
+		return
+	}
+
+	language := strings.TrimSpace(r.FormValue("language"))
+	if language == "" {
+		language = "ru"
+	}
+	model := strings.TrimSpace(r.FormValue("model"))
+	if model == "" {
+		model = "whisper-large-v3"
+	}
+
+	text, err := transcribeWithGroq(r.Context(), apiKey, model, language, sanitizeUploadName(header.Filename), header.Header.Get("Content-Type"), fileData)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, transcriptionResponse{Text: text})
+}
+
+func transcribeWithGroq(ctx context.Context, apiKey string, model string, language string, fileName string, contentType string, fileData []byte) (string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("model", model); err != nil {
+		return "", err
+	}
+	if language != "" {
+		if err := writer.WriteField("language", language); err != nil {
+			return "", err
+		}
+	}
+	if contentType == "" {
+		contentType = contentTypeForPath(fileName)
+	}
+	part, err := writer.CreatePart(textprotoMIMEHeader(map[string]string{
+		"Content-Disposition": "form-data; name=\"file\"; filename=\"" + sanitizeDownloadFilename(fileName) + "\"",
+		"Content-Type":        contentType,
+	}))
+	if err != nil {
+		return "", err
+	}
+	if _, err := part.Write(fileData); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.groq.com/openai/v1/audio/transcriptions", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := strings.TrimSpace(string(respBody))
+		if message == "" {
+			message = resp.Status
+		}
+		return "", errors.New("Groq transcription failed: " + message)
+	}
+	var decoded transcriptionResponse
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		return "", err
+	}
+	decoded.Text = strings.TrimSpace(decoded.Text)
+	if decoded.Text == "" {
+		return "", errors.New("Groq returned an empty transcript")
+	}
+	return decoded.Text, nil
+}
+
+func textprotoMIMEHeader(values map[string]string) textproto.MIMEHeader {
+	header := textproto.MIMEHeader{}
+	for key, value := range values {
+		header.Set(key, value)
+	}
+	return header
 }
 
 func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentReference) (rpcPromptCommand, error) {
