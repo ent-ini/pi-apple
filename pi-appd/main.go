@@ -337,6 +337,10 @@ type deviceListResponse struct {
 	Devices []deviceRecord `json:"devices"`
 }
 
+type deviceJobsResponse struct {
+	Jobs []deviceJobRecord `json:"jobs"`
+}
+
 type deviceJobCreateRequest struct {
 	Script         string `json:"script"`
 	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
@@ -3740,11 +3744,14 @@ func (s *server) handleDeviceSubroutes(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceID := parts[0]
 	if len(parts) == 2 && parts[1] == "jobs" {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleListDeviceJobs(w, r, deviceID)
+		case http.MethodPost:
+			s.handleCreateDeviceJob(w, r, deviceID)
+		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
 		}
-		s.handleCreateDeviceJob(w, r, deviceID)
 		return
 	}
 	if len(parts) == 3 && parts[1] == "jobs" && parts[2] == "stream" {
@@ -3756,6 +3763,30 @@ func (s *server) handleDeviceSubroutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not found")
+}
+
+func (s *server) handleListDeviceJobs(w http.ResponseWriter, r *http.Request, deviceID string) {
+	s.devicesMu.Lock()
+	if _, ok := s.devices[deviceID]; !ok {
+		s.devicesMu.Unlock()
+		writeError(w, http.StatusNotFound, "unknown device")
+		return
+	}
+	jobs := make([]deviceJobRecord, 0)
+	for _, job := range s.deviceJobs {
+		if job.DeviceID == deviceID && (job.Status == "queued" || job.Status == "running") {
+			jobs = append(jobs, *job)
+		}
+	}
+	if device, ok := s.devices[deviceID]; ok {
+		device.LastSeenAt = time.Now().UTC()
+		s.devices[deviceID] = device
+	}
+	s.devicesMu.Unlock()
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].CreatedAt.Before(jobs[j].CreatedAt)
+	})
+	writeJSON(w, http.StatusOK, deviceJobsResponse{Jobs: jobs})
 }
 
 func (s *server) handleCreateDeviceJob(w http.ResponseWriter, r *http.Request, deviceID string) {

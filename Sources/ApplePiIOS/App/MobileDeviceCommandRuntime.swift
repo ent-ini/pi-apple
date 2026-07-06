@@ -22,7 +22,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     private let deviceInfoSnapshot: [String: String]
     private var streamTask: Task<Void, Never>?
 
-    static let runtimeVersion = "device-js.v5-direct-before-mainactor"
+    static let runtimeVersion = "device-js.v6-polling-jobs"
 
     static let capabilities = [
         runtimeVersion,
@@ -63,6 +63,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
         let deviceName = deviceName
         let onStatus = onStatus
         streamTask = Task { [weak self] in
+            var handledJobIDs = Set<String>()
             while !Task.isCancelled {
                 do {
                     try await RemoteDaemonClient().registerDevice(
@@ -74,25 +75,30 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
                         tokenOverride: token
                     )
                     await MainActor.run { onStatus("iPhone JS executor connected.") }
-                    for try await job in RemoteDaemonClient().streamDeviceJobs(host: host, deviceID: deviceID, tokenOverride: token) {
-                        guard !Task.isCancelled else { return }
-                        await MainActor.run { onStatus("Running iPhone JS job \(job.id)…") }
-                        let execution = await self?.execute(job: job) ?? MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "runtime stopped", logs: [])
-                        await MainActor.run { onStatus("Finished iPhone JS job \(job.id), submitting result…") }
-                        do {
-                            _ = try await RemoteDaemonClient().submitDeviceJobResult(
-                                host: host,
-                                jobID: job.id,
-                                ok: execution.ok,
-                                resultJSON: execution.resultJSON,
-                                error: execution.error,
-                                logs: execution.logs,
-                                tokenOverride: token
-                            )
-                            await MainActor.run { onStatus(execution.ok ? "iPhone JS job finished." : "iPhone JS job failed: \(execution.error ?? "unknown error")") }
-                        } catch {
-                            await MainActor.run { onStatus("Could not submit iPhone JS result: \(error.localizedDescription)") }
+                    while !Task.isCancelled {
+                        let jobs = try await RemoteDaemonClient().loadDeviceJobs(host: host, deviceID: deviceID, tokenOverride: token)
+                        for job in jobs where !handledJobIDs.contains(job.id) {
+                            handledJobIDs.insert(job.id)
+                            guard !Task.isCancelled else { return }
+                            await MainActor.run { onStatus("Running iPhone JS job \(job.id)…") }
+                            let execution = await self?.execute(job: job) ?? MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "runtime stopped", logs: [])
+                            await MainActor.run { onStatus("Finished iPhone JS job \(job.id), submitting result…") }
+                            do {
+                                _ = try await RemoteDaemonClient().submitDeviceJobResult(
+                                    host: host,
+                                    jobID: job.id,
+                                    ok: execution.ok,
+                                    resultJSON: execution.resultJSON,
+                                    error: execution.error,
+                                    logs: execution.logs,
+                                    tokenOverride: token
+                                )
+                                await MainActor.run { onStatus(execution.ok ? "iPhone JS job finished." : "iPhone JS job failed: \(execution.error ?? "unknown error")") }
+                            } catch {
+                                await MainActor.run { onStatus("Could not submit iPhone JS result: \(error.localizedDescription)") }
+                            }
                         }
+                        try await Task.sleep(for: .seconds(2))
                     }
                 } catch {
                     await MainActor.run { onStatus("iPhone JS executor disconnected: \(error.localizedDescription)") }

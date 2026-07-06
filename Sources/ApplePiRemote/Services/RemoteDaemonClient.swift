@@ -37,6 +37,19 @@ public struct RemoteDaemonClient: Sendable {
         )
     }
 
+    public func loadDeviceJobs(
+        host: PiHostConfiguration,
+        deviceID: String,
+        tokenOverride: String? = nil
+    ) async throws -> [RemoteDeviceJobRecord] {
+        let response: RemoteDeviceJobsResponse = try await send(
+            host: host,
+            path: "/devices/\(encodedPathComponent(deviceID))/jobs",
+            tokenOverride: tokenOverride
+        )
+        return response.jobs
+    }
+
     public func streamDeviceJobs(
         host: PiHostConfiguration,
         deviceID: String,
@@ -1390,6 +1403,10 @@ private struct RemoteDeviceRegisterRequest: Encodable {
     let name: String
     let platform: String
     let capabilities: [String]
+}
+
+private struct RemoteDeviceJobsResponse: Decodable {
+    let jobs: [RemoteDeviceJobRecord]
 }
 
 private struct RemoteDeviceJobStreamEvent: Decodable {
