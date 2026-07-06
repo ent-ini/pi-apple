@@ -264,7 +264,7 @@ private struct MobileSessionDetailView: View {
 
             Spacer(minLength: 0)
 
-            if appState.isLoadingSession || appState.isLoadingRuntime {
+            if appState.isSelectedSessionBusy {
                 ProgressView()
                     .controlSize(.small)
                     .tint(appState.appearance.accentColor)
@@ -272,10 +272,6 @@ private struct MobileSessionDetailView: View {
 
             MobileIconButton(systemName: "square.and.pencil", help: "New session") {
                 appState.startNewSession()
-            }
-
-            MobileIconButton(systemName: "arrow.clockwise", help: "Reload session", isDisabled: appState.selectedSession == nil || appState.isLoadingSession) {
-                Task { await appState.reloadSelectedSession() }
             }
         }
     }
@@ -538,6 +534,11 @@ private struct MessageBubble: View {
                     Spacer(minLength: 32)
                 }
             }
+            .contextMenu {
+                Button("Copy message") {
+                    copyMessageToPasteboard()
+                }
+            }
         }
     }
 
@@ -546,26 +547,26 @@ private struct MessageBubble: View {
             if !thinkingText.isEmpty {
                 MobileThinkingSummaryView(thinkingText: thinkingText)
             }
-            ForEach(Array(visibleBlocks.enumerated()), id: \.offset) { _, block in
-                blockView(block)
+            ForEach(Array(visibleBlocks.enumerated()), id: \.offset) { index, block in
+                blockView(block, isLastVisibleBlock: index == visibleBlocks.count - 1)
             }
         }
     }
 
     @ViewBuilder
-    private func blockView(_ block: ContentBlock) -> some View {
+    private func blockView(_ block: ContentBlock, isLastVisibleBlock: Bool) -> some View {
         switch block {
         case .text(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
-                bubbleSurface {
+                bubbleSurface(isLastVisibleBlock: isLastVisibleBlock) {
                     MobileMarkdownText(trimmed)
                 }
             }
         case .thinking:
             EmptyView()
         case .image(let path, let mime):
-            bubbleSurface {
+            bubbleSurface(isLastVisibleBlock: isLastVisibleBlock) {
                 if let mime {
                     Text("[image: \(path), \(mime)]")
                 } else {
@@ -575,12 +576,27 @@ private struct MessageBubble: View {
         }
     }
 
-    private func bubbleSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .padding(12)
-            .background(bubbleBackground)
-            .foregroundStyle(bubbleTextColor)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    private func bubbleSurface<Content: View>(isLastVisibleBlock: Bool, @ViewBuilder content: () -> Content) -> some View {
+        let showsTimestamp = isLastVisibleBlock && formattedTime != nil
+        return VStack(alignment: .leading, spacing: 0) {
+            content()
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, showsTimestamp ? 24 : 12)
+        .background(bubbleBackground)
+        .foregroundStyle(bubbleTextColor)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(alignment: .bottomTrailing) {
+            if isLastVisibleBlock, let timestamp = formattedTime {
+                Text(timestamp)
+                    .font(.caption2)
+                    .foregroundStyle(timestampColor)
+                    .padding(.trailing, 10)
+                    .padding(.bottom, 7)
+            }
+        }
     }
 
     private var bubbleBackground: Color {
@@ -601,6 +617,15 @@ private struct MessageBubble: View {
         case .assistant, .system:
             return appState.appearance.assistantMessageTextColor(for: resolvedColorScheme)
         }
+    }
+
+    private var timestampColor: Color {
+        bubbleTextColor.opacity(message.role == .user ? 0.82 : 0.64)
+    }
+
+    private var formattedTime: String? {
+        guard let timestamp = message.timestamp else { return nil }
+        return Self.timeFormatter.string(from: timestamp)
     }
 
     private var visibleBlocks: [ContentBlock] {
@@ -635,6 +660,20 @@ private struct MessageBubble: View {
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
     }
+
+    private func copyMessageToPasteboard() {
+        let text = MobileMessageTextSanitizer.copyText(from: message)
+        #if canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
 }
 
 private enum MobileMessageTextSanitizer {
@@ -655,6 +694,24 @@ private enum MobileMessageTextSanitizer {
             options: .regularExpression
         )
         return collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func copyText(from message: Message) -> String {
+        let parts = message.content.compactMap { block -> String? in
+            switch block {
+            case .text(let text):
+                let visible = visibleText(from: text)
+                return visible.isEmpty ? nil : visible
+            case .thinking:
+                return nil
+            case .image(let path, let mime):
+                if let mime {
+                    return "[image: \(path), \(mime)]"
+                }
+                return "[image: \(path)]"
+            }
+        }
+        return parts.joined(separator: "\n\n")
     }
 }
 

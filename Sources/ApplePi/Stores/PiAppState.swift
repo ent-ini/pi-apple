@@ -1025,7 +1025,7 @@ final class PiAppState: ObservableObject {
             return false
         }
         let effectivePrompt = trimmed.isEmpty ? "Please inspect the attached item(s)." : trimmed
-        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt)
+        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, session: session)
         statusMessage = "Sending to Pi..."
         // UI-wise queued input is just another user message. The daemon decides
         // whether /input becomes a fresh turn or active-run steering; the app
@@ -1085,7 +1085,7 @@ final class PiAppState: ObservableObject {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return false }
         let effectivePrompt = trimmed.isEmpty ? "Please inspect the attached item(s)." : trimmed
-        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt)
+        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, session: session)
         if session.hasActiveSend && session.canAcceptSteering {
             return steerMessage(prompt, attachments: attachments, in: session, onAccepted: onAccepted)
         }
@@ -2788,12 +2788,30 @@ final class PiAppState: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
-    private func sourceTaggedAppPrompt(_ text: String) -> String {
-        let tag = "[source:pi-app type=text]"
-        if text.hasPrefix(tag) {
+    private func sourceTaggedAppPrompt(_ text: String, session: ChatSession) -> String {
+        if text.range(of: #"^\[source:[^\]]+\]"#, options: .regularExpression) != nil {
             return text
         }
-        return "\(tag)\n\(text)"
+        let runtime = session.runtimeState
+        let model = runtime?.modelID?.nilIfBlank ?? session.launchRequest?.initialModelID ?? "unknown"
+        let thinking = runtime?.thinkingLevel.nilIfBlank ?? session.launchRequest?.initialThinkingLevel ?? "off"
+        let fields = [
+            "source:pi-macos-app",
+            "type=text",
+            "session=\"\(Self.sourceTagValue(session.title))\"",
+            "model=\"\(Self.sourceTagValue(model))\"",
+            "thinking=\"\(Self.sourceTagValue(thinking))\""
+        ]
+        return "[\(fields.joined(separator: " "))]\n\(text)"
+    }
+
+    private static func sourceTagValue(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "'")
+            .replacingOccurrences(of: "]", with: ")")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func promoteSidebarSession(for session: ChatSession, fallbackAliases: [String]) {

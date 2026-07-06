@@ -337,6 +337,11 @@ struct MessageBubble: View {
                     Spacer(minLength: 90)
                 }
             }
+            .contextMenu {
+                Button("Copy message") {
+                    copyMessageToPasteboard()
+                }
+            }
         }
     }
 
@@ -595,6 +600,50 @@ struct MessageBubble: View {
                 }
             }
             return NSImage(contentsOfFile: trimmed)
+        }
+    }
+
+    private func copyMessageToPasteboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(copyableMessageText, forType: .string)
+    }
+
+    private var copyableMessageText: String {
+        if let presentation = userPresentation {
+            var parts = presentation.attachments.map(copyText(for:))
+            if !presentation.text.isEmpty {
+                parts.append(presentation.text)
+            }
+            return parts.joined(separator: "\n\n")
+        }
+
+        let parts = message.content.compactMap { block -> String? in
+            switch block {
+            case .text(let rawText):
+                let sanitized = UserMessagePresentation.sanitizeTextOnly(rawText)
+                let text = ChatFileReferenceExtractor.extract(from: sanitized).text
+                return text.isEmpty ? nil : text
+            case .thinking:
+                return nil
+            case .image(let path, let mime):
+                if let mime {
+                    return "[image: \(path), \(mime)]"
+                }
+                return "[image: \(path)]"
+            }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func copyText(for attachment: UserVisibleAttachment) -> String {
+        switch attachment.kind {
+        case .image(let path, let mime):
+            if let mime {
+                return "[image: \(path), \(mime)]"
+            }
+            return "[image: \(path)]"
+        case .file(let path, let displayName, let isAudio):
+            return "[\(isAudio ? "audio" : "file"): \(displayName) — \(path)]"
         }
     }
 

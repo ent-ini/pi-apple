@@ -123,6 +123,10 @@ final class MobilePiAppState: ObservableObject {
         selectedRuntime?.thinkingLevel ?? "off"
     }
 
+    var isSelectedSessionBusy: Bool {
+        isSending || isLoadingSession || isLoadingRuntime || (selectedSession?.isGenerating == true)
+    }
+
     var selectableAvailableModels: [PiModelOption] {
         let currentSessionModels = Self.selectableModels(from: availableModels)
         return currentSessionModels.isEmpty ? cachedSelectableAvailableModels : currentSessionModels
@@ -463,18 +467,20 @@ final class MobilePiAppState: ObservableObject {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         let startsNewSession = selectedSession == nil
+        let sessionTitleForSource = selectedSession?.title ?? "New Session"
+        let taggedPrompt = sourceTaggedAppPrompt(prompt, sessionTitle: sessionTitleForSource)
         draft = ""
         if startsNewSession {
             resetSelectedTranscript()
         }
-        appendOptimisticUserMessage(prompt)
+        appendOptimisticUserMessage(taggedPrompt)
         isSending = true
         defer { isSending = false }
 
         let host = host
         do {
             if let selectedSession {
-                try await RemoteDaemonClient().streamSend(host: host, sessionID: selectedSession.id, prompt: prompt) { event in
+                try await RemoteDaemonClient().streamSend(host: host, sessionID: selectedSession.id, prompt: taggedPrompt) { event in
                     await self.handleTurnStreamEvent(event)
                 }
             } else {
@@ -486,7 +492,7 @@ final class MobilePiAppState: ObservableObject {
                     request.hasExplicitInitialModel = true
                     request.hasExplicitInitialThinkingLevel = defaultModelPreference.thinkingLevel?.nilIfBlank != nil
                 }
-                try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: prompt) { event in
+                try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt) { event in
                     await self.handleTurnStreamEvent(event)
                 }
             }
@@ -896,6 +902,30 @@ final class MobilePiAppState: ObservableObject {
                 }
                 return $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending
             }
+    }
+
+    private func sourceTaggedAppPrompt(_ text: String, sessionTitle: String) -> String {
+        if text.range(of: #"^\[source:[^\]]+\]"#, options: .regularExpression) != nil {
+            return text
+        }
+        let model = selectedModelDisplayName.nilIfBlank ?? selectedSession?.latestModel ?? defaultModelPreference?.id ?? "unknown"
+        let fields = [
+            "source:pi-ios-app",
+            "type=text",
+            "session=\"\(Self.sourceTagValue(sessionTitle))\"",
+            "model=\"\(Self.sourceTagValue(model))\"",
+            "thinking=\"\(Self.sourceTagValue(selectedThinkingLevel))\""
+        ]
+        return "[\(fields.joined(separator: " "))]\n\(text)"
+    }
+
+    private static func sourceTagValue(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "'")
+            .replacingOccurrences(of: "]", with: ")")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func loadAppearance() {
