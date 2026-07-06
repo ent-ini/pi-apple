@@ -1020,17 +1020,46 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private func normalizedMessageText(_ text: String) -> String {
-        text
-            // pi-appd persists image uploads as an empty <file ...></file>
-            // text marker plus a real image content block. The optimistic
-            // bubble only has the image block, so strip this transport marker
-            // before matching transient rows to persisted JSONL rows.
-            .replacingOccurrences(
-                of: #"<file\b[^>]*>\s*</file>"#,
-                with: "",
-                options: .regularExpression
-            )
+        normalizeFileSentinelSpacing(in: normalizedFileBlocks(in: text))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedFileBlocks(in text: String) -> String {
+        // pi-appd persists attachments differently from the optimistic bubble:
+        // - images become an empty <file ...></file> marker plus an image block;
+        // - generic files are expanded to the uploaded file contents and use a
+        //   daemon-side path instead of the locally staged macOS path.
+        // Normalize transport file blocks before comparing transient messages
+        // to persisted JSONL rows, otherwise the optimistic file-send bubble can
+        // remain visible next to the committed user message.
+        let pattern = #"<file\b[^>]*>([\s\S]*?)</file>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            let body: String
+            if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
+                body = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                body = ""
+            }
+            let replacement = body.isEmpty ? "" : "[file]"
+            if let range = Range(match.range, in: result) {
+                result.replaceSubrange(range, with: replacement)
+            }
+        }
+        return result
+    }
+
+    private func normalizeFileSentinelSpacing(in text: String) -> String {
+        text.replacingOccurrences(
+            of: #"\[file\][ \t\r\n]+"#,
+            with: "[file]\n",
+            options: .regularExpression
+        )
     }
 
     private static let transientUserLineIndex = Int.max - 2_000

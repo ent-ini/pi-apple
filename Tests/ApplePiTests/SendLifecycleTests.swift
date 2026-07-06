@@ -162,6 +162,43 @@ private actor SessionEventsPageBox {
 }
 
 @MainActor
+@Test func chatSessionReconcilesFilePromptWhenPersistedFileIsExpanded() {
+    let session = ChatSession(key: "test", title: "Test")
+    let attachment = ChatAttachment(
+        kind: .file,
+        fileURL: URL(fileURLWithPath: "/Users/artemiy/Library/Application Support/ApplePi/attachments/list.md"),
+        displayName: "list.md",
+        mimeType: "text/markdown",
+        size: 456
+    )
+
+    let prompt = "[source:pi-app type=text]\nперенеси отмеченные"
+    session.beginSending(prompt: prompt, attachments: [attachment])
+    session.appendPersistedEvents([
+        .message(
+            Message(
+                id: "persisted-user",
+                role: .user,
+                content: [
+                    .text("<file name=\"/home/agent/.pi/agent/uploads/list-123.md\">\n# List\n\n| id | Import |\n|---:|---|\n| 1 | х |\n</file>\n\n\(prompt)")
+                ],
+                model: nil,
+                timestamp: Date(),
+                parentId: nil
+            ),
+            lineIndex: 0
+        )
+    ])
+
+    let userMessages = session.events.compactMap { event -> Message? in
+        guard case .message(let message, _) = event,
+              message.role == .user else { return nil }
+        return message
+    }
+    #expect(userMessages.map(\.id) == ["persisted-user"])
+}
+
+@MainActor
 @Test func chatSessionDoesNotHideRepeatedPromptFromOlderPersistedTurn() {
     let session = ChatSession(key: "test", title: "Test")
     session.appendPersistedEvents([
