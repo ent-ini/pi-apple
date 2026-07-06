@@ -274,10 +274,14 @@ private final class MobileJavaScriptExecutor {
     }
 
     func run(script: String, timeoutSeconds: Int) -> MobileDeviceScriptExecutionResult {
-        guard let context = JSContext() else {
-            return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "Could not create JavaScript context", logs: [])
-        }
         var logs = ["timeoutSeconds=\(timeoutSeconds)"]
+        if let direct = Self.directReturnResultIfPossible(script) {
+            logs.append("directReturnFallback=true")
+            return MobileDeviceScriptExecutionResult(ok: true, resultJSON: direct, error: nil, logs: logs)
+        }
+        guard let context = JSContext(virtualMachine: JSVirtualMachine()) else {
+            return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "Could not create JavaScript context", logs: logs)
+        }
         var exceptionMessage: String?
         context.exceptionHandler = { _, exception in
             exceptionMessage = exception?.toString()
@@ -345,6 +349,21 @@ private final class MobileJavaScriptExecutor {
             return "{}"
         }
         return string
+    }
+
+    private static func directReturnResultIfPossible(_ script: String) -> String? {
+        let trimmed = script.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("return "), trimmed.hasSuffix(";") else { return nil }
+        let expression = String(trimmed.dropFirst("return ".count).dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        if Double(expression) != nil { return expression }
+        if expression == "true" || expression == "false" || expression == "null" { return expression }
+        if (expression.hasPrefix("\"") && expression.hasSuffix("\"")) || (expression.hasPrefix("'") && expression.hasSuffix("'")) {
+            let unquoted = String(expression.dropFirst().dropLast())
+            if let data = try? JSONEncoder().encode(unquoted) {
+                return String(data: data, encoding: .utf8)
+            }
+        }
+        return nil
     }
 
     private static func jsonString(from value: JSValue?) -> String {
