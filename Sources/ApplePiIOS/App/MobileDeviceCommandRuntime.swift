@@ -22,7 +22,10 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     private let deviceInfoSnapshot: [String: String]
     private var streamTask: Task<Void, Never>?
 
+    static let runtimeVersion = "device-js.v4-direct-fallback-mainactor"
+
     static let capabilities = [
+        runtimeVersion,
         "js.fullBridge",
         "pi.device.info",
         "pi.app.info",
@@ -75,6 +78,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
                         guard !Task.isCancelled else { return }
                         await MainActor.run { onStatus("Running iPhone JS job \(job.id)…") }
                         let execution = await self?.execute(job: job) ?? MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "runtime stopped", logs: [])
+                        await MainActor.run { onStatus("Finished iPhone JS job \(job.id), submitting result…") }
                         do {
                             _ = try await RemoteDaemonClient().submitDeviceJobResult(
                                 host: host,
