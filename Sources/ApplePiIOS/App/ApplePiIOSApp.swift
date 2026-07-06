@@ -29,6 +29,9 @@ final class MobilePiAppState: ObservableObject {
     @Published var daemonToken: String {
         didSet { saveToken() }
     }
+    @Published var appearance = MobileAppAppearance() {
+        didSet { saveAppearance() }
+    }
     @Published private(set) var projects: [PiProject] = []
     @Published private(set) var sessions: [PiSessionSummary] = []
     @Published private(set) var selectedSession: PiSessionSummary?
@@ -39,7 +42,10 @@ final class MobilePiAppState: ObservableObject {
     @Published private(set) var isSending = false
     @Published private(set) var selectedRuntime: SessionRuntimeState?
     @Published private(set) var availableModels: [PiModelOption] = []
+    @Published private(set) var cachedAvailableModels: [PiModelOption] = []
     @Published private(set) var isLoadingRuntime = false
+    @Published private(set) var isLoadingAvailableModels = false
+    @Published private(set) var defaultModelPreference: DefaultModelPreference?
     @Published var draft = ""
     @Published var sessionSearchText = ""
 
@@ -47,6 +53,10 @@ final class MobilePiAppState: ObservableObject {
 
     private let defaults: UserDefaults
     private let hostDefaultsKey = "ApplePiIOS.host"
+    private let appearanceDefaultsKey = "ApplePi.appearance"
+    private let modelDefaultsKey = "ApplePi.modelDefaults"
+    private let availableModelsCacheDefaultsKey = "ApplePi.availableModelsCache"
+    private var availableModelsCacheLoadedAt: Date?
     private var catalogStreamTask: Task<Void, Never>?
     private var selectedSessionStreamTask: Task<Void, Never>?
     private var selectedSessionGeneration = UUID()
@@ -63,6 +73,9 @@ final class MobilePiAppState: ObservableObject {
             daemonURL = ""
             daemonToken = ""
         }
+        loadAppearance()
+        loadModelDefaults()
+        loadAvailableModelsCache()
     }
 
     deinit {
@@ -96,8 +109,32 @@ final class MobilePiAppState: ObservableObject {
         selectedRuntime?.modelDisplayName ?? selectedSession?.latestModel ?? "model"
     }
 
+    var selectedModelID: String? {
+        guard let provider = selectedRuntime?.provider?.nilIfBlank,
+              let modelID = selectedRuntime?.modelID?.nilIfBlank else { return nil }
+        return "\(provider)/\(modelID)"
+    }
+
     var selectedThinkingLevel: String {
         selectedRuntime?.thinkingLevel ?? "off"
+    }
+
+    var selectableAvailableModels: [PiModelOption] {
+        let currentSessionModels = Self.selectableModels(from: availableModels)
+        return currentSessionModels.isEmpty ? cachedSelectableAvailableModels : currentSessionModels
+    }
+
+    var cachedSelectableAvailableModels: [PiModelOption] {
+        Self.selectableModels(from: cachedAvailableModels)
+    }
+
+    var defaultModelDisplayName: String {
+        guard let defaultModelPreference else { return "Use daemon default" }
+        return defaultModelPreference.id
+    }
+
+    var defaultThinkingDisplayName: String {
+        defaultModelPreference?.thinkingLevel?.nilIfBlank ?? "Use daemon default"
     }
 
     func loadInitialCatalogIfConfigured() async {
@@ -256,7 +293,10 @@ final class MobilePiAppState: ObservableObject {
             let (loadedRuntime, loadedModels) = try await (runtime, models)
             guard selectedSession?.id == sessionID else { return }
             selectedRuntime = loadedRuntime
-            availableModels = loadedModels
+            availableModels = Self.selectableModels(from: loadedModels)
+            if !loadedModels.isEmpty {
+                cacheAvailableModels(Self.selectableModels(from: loadedModels))
+            }
         } catch {
             guard selectedSession?.id == sessionID else { return }
             statusMessage = "Could not load runtime: \(error.localizedDescription)"
@@ -298,6 +338,67 @@ final class MobilePiAppState: ObservableObject {
         }
     }
 
+    func refreshAvailableModelsCache(force: Bool = false) {
+        guard isConfigured else {
+            statusMessage = "Remote API URL is not configured."
+            return
+        }
+        if !force, !cachedSelectableAvailableModels.isEmpty { return }
+        if isLoadingAvailableModels { return }
+
+        isLoadingAvailableModels = true
+        let host = host
+        let token = daemonToken.nilIfBlank
+        Task { [weak self] in
+            do {
+                let models = try await RemoteDaemonClient().loadAvailableModels(host: host, tokenOverride: token)
+                await MainActor.run {
+                    guard let self, self.host == host else { return }
+                    self.cacheAvailableModels(Self.selectableModels(from: models))
+                    self.isLoadingAvailableModels = false
+                    if self.selectedSession != nil {
+                        self.availableModels = Self.selectableModels(from: models)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isLoadingAvailableModels = false
+                    self.statusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func setDefaultModel(_ model: PiModelOption?) {
+        guard let model else {
+            setDefaultModelPreference(nil)
+            return
+        }
+        setDefaultModelPreference(DefaultModelPreference(
+            provider: model.provider,
+            modelID: model.modelID,
+            thinkingLevel: defaultModelPreference?.thinkingLevel
+        ))
+    }
+
+    func setDefaultThinkingLevel(_ level: String?) {
+        guard var preference = defaultModelPreference else { return }
+        preference.thinkingLevel = level?.nilIfBlank
+        setDefaultModelPreference(preference)
+    }
+
+    func setDefaultModelPreference(_ preference: DefaultModelPreference?) {
+        defaultModelPreference = preference
+        saveModelDefaults()
+    }
+
+    func updateAppearance(_ update: (inout MobileAppAppearance) -> Void) {
+        var copy = appearance
+        update(&copy)
+        appearance = copy
+    }
+
     func sendDraft() async {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
@@ -313,7 +414,14 @@ final class MobilePiAppState: ObservableObject {
                 }
             } else {
                 resetSelectedTranscript()
-                let request = PiLaunchRequest(workingDirectory: host.defaultWorkingDirectory)
+                var request = PiLaunchRequest(workingDirectory: host.defaultWorkingDirectory)
+                if let defaultModelPreference {
+                    request.initialModelProvider = defaultModelPreference.provider
+                    request.initialModelID = defaultModelPreference.modelID
+                    request.initialThinkingLevel = defaultModelPreference.thinkingLevel
+                    request.hasExplicitInitialModel = true
+                    request.hasExplicitInitialThinkingLevel = defaultModelPreference.thinkingLevel?.nilIfBlank != nil
+                }
                 try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: prompt) { event in
                     await self.handleTurnStreamEvent(event)
                 }
@@ -609,6 +717,87 @@ final class MobilePiAppState: ObservableObject {
                 return lhs.offset < rhs.offset
             }
         }.map(\.element)
+    }
+
+    private static func selectableModels(from models: [PiModelOption]) -> [PiModelOption] {
+        models
+            .filter { model in
+                let provider = model.provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return provider != "groq" && provider != "groq-api" && !model.id.lowercased().hasPrefix("groq/")
+            }
+            .sorted {
+                if $0.provider.localizedCaseInsensitiveCompare($1.provider) != .orderedSame {
+                    return $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending
+                }
+                return $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending
+            }
+    }
+
+    private func loadAppearance() {
+        guard let data = defaults.data(forKey: appearanceDefaultsKey),
+              let decoded = try? JSONDecoder().decode(MobileAppAppearance.self, from: data) else {
+            return
+        }
+        appearance = decoded
+    }
+
+    private func saveAppearance() {
+        guard let data = try? JSONEncoder().encode(appearance) else { return }
+        defaults.set(data, forKey: appearanceDefaultsKey)
+    }
+
+    private func loadModelDefaults() {
+        guard let data = defaults.data(forKey: modelDefaultsKey),
+              let decoded = try? JSONDecoder().decode(DefaultModelPreference.self, from: data),
+              Self.selectableModels(from: [PiModelOption(
+                provider: decoded.provider,
+                modelID: decoded.modelID,
+                name: nil,
+                reasoning: false,
+                contextWindow: nil
+              )]).isEmpty == false else {
+            return
+        }
+        defaultModelPreference = decoded
+    }
+
+    private func saveModelDefaults() {
+        guard let defaultModelPreference else {
+            defaults.removeObject(forKey: modelDefaultsKey)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(defaultModelPreference) else { return }
+        defaults.set(data, forKey: modelDefaultsKey)
+    }
+
+    private struct AvailableModelsCacheSnapshot: Codable {
+        let models: [PiModelOption]
+        let loadedAt: Date
+    }
+
+    private func loadAvailableModelsCache() {
+        guard let data = defaults.data(forKey: availableModelsCacheDefaultsKey),
+              let decoded = try? JSONDecoder().decode(AvailableModelsCacheSnapshot.self, from: data) else {
+            return
+        }
+        cachedAvailableModels = Self.selectableModels(from: decoded.models)
+        availableModelsCacheLoadedAt = decoded.loadedAt
+    }
+
+    private func cacheAvailableModels(_ models: [PiModelOption], loadedAt: Date = Date()) {
+        cachedAvailableModels = Self.selectableModels(from: models)
+        availableModelsCacheLoadedAt = loadedAt
+        saveAvailableModelsCache()
+    }
+
+    private func saveAvailableModelsCache() {
+        guard !cachedAvailableModels.isEmpty,
+              let loadedAt = availableModelsCacheLoadedAt,
+              let data = try? JSONEncoder().encode(AvailableModelsCacheSnapshot(models: cachedAvailableModels, loadedAt: loadedAt)) else {
+            defaults.removeObject(forKey: availableModelsCacheDefaultsKey)
+            return
+        }
+        defaults.set(data, forKey: availableModelsCacheDefaultsKey)
     }
 
     private func saveHost() {

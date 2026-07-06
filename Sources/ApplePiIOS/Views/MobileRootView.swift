@@ -18,8 +18,8 @@ struct MobileRootView: View {
             }
             .hiddenMobileNavigationBar()
         }
-        .tint(MobileTheme.accentColor)
-        .preferredColorScheme(colorScheme)
+        .tint(appState.appearance.accentColor)
+        .preferredColorScheme(appState.appearance.colorScheme.colorScheme)
         .sheet(isPresented: $showsSettings) {
             NavigationStack {
                 MobileSettingsView()
@@ -55,13 +55,18 @@ private struct MobileSessionListView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
                 .padding(.bottom, 10)
+                .background(appState.appearance.topBarBackgroundColor(for: resolvedColorScheme))
 
             Divider().opacity(0.24)
 
             content
         }
-        .foregroundStyle(MobileTheme.textColor(for: colorScheme))
-        .background(MobileTheme.sidebarBackgroundColor(for: colorScheme).ignoresSafeArea())
+        .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+        .background(appState.appearance.sidebarBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 
     private var topBar: some View {
@@ -129,6 +134,7 @@ private struct MobileSessionListView: View {
 
 private struct MobileSessionRow: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
     let session: PiSessionSummary
     let isSelected: Bool
     let isSending: Bool
@@ -139,7 +145,7 @@ private struct MobileSessionRow: View {
                 VStack(alignment: .leading, spacing: 7) {
                     Text(session.title)
                         .font(.headline.weight(.semibold))
-                        .foregroundStyle(MobileTheme.textColor(for: colorScheme))
+                        .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
                         .lineLimit(1)
 
                     HStack(spacing: 8) {
@@ -159,12 +165,12 @@ private struct MobileSessionRow: View {
                 if isSending {
                     ProgressView()
                         .controlSize(.small)
-                        .tint(MobileTheme.accentColor)
+                        .tint(appState.appearance.accentColor)
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(isSelected ? MobileTheme.controlTint(for: colorScheme, opacity: 0.14) : Color.clear)
+            .background(isSelected ? MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.14) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             Divider()
@@ -172,12 +178,18 @@ private struct MobileSessionRow: View {
                 .opacity(isSelected ? 0 : 0.28)
         }
     }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
 }
 
 private struct MobileSessionDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: MobilePiAppState
+    @State private var showsModelPicker = false
+    @State private var showsThinkingPicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -185,6 +197,7 @@ private struct MobileSessionDetailView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
                 .padding(.bottom, 8)
+                .background(appState.appearance.topBarBackgroundColor(for: resolvedColorScheme))
 
             Divider().opacity(0.24)
 
@@ -201,11 +214,23 @@ private struct MobileSessionDetailView: View {
 
             composer
         }
-        .foregroundStyle(MobileTheme.textColor(for: colorScheme))
-        .background(MobileTheme.mainBackgroundColor(for: colorScheme).ignoresSafeArea())
+        .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+        .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
         .hiddenMobileNavigationBar()
         .task(id: appState.selectedSession?.id) {
             await appState.refreshSelectedRuntimeAndModels()
+        }
+        .sheet(isPresented: $showsModelPicker) {
+            NavigationStack {
+                MobileModelPickerSheet()
+            }
+            .environmentObject(appState)
+        }
+        .sheet(isPresented: $showsThinkingPicker) {
+            NavigationStack {
+                MobileThinkingPickerSheet()
+            }
+            .environmentObject(appState)
         }
     }
 
@@ -215,14 +240,24 @@ private struct MobileSessionDetailView: View {
                 dismiss()
             }
 
-            sessionTitleMenu
+            sessionTitlePill
+
+            if appState.selectedSession != nil {
+                MobileRuntimePill(systemName: "cpu", title: appState.selectedModelDisplayName) {
+                    showsModelPicker = true
+                    appState.refreshAvailableModelsCache()
+                }
+                MobileRuntimePill(systemName: "brain", title: appState.selectedThinkingLevel) {
+                    showsThinkingPicker = true
+                }
+            }
 
             Spacer(minLength: 0)
 
             if appState.isLoadingSession || appState.isLoadingRuntime {
                 ProgressView()
                     .controlSize(.small)
-                    .tint(MobileTheme.accentColor)
+                    .tint(appState.appearance.accentColor)
             }
 
             MobileIconButton(systemName: "square.and.pencil", help: "New session") {
@@ -235,80 +270,15 @@ private struct MobileSessionDetailView: View {
         }
     }
 
-    private var sessionTitleMenu: some View {
-        Menu {
-            if appState.selectedSession == nil {
-                Text("No active session yet")
-            } else {
-                Menu {
-                    if groupedModels.isEmpty {
-                        Text("Loading models…")
-                    } else {
-                        ForEach(groupedModels) { group in
-                            Section(group.provider) {
-                                ForEach(group.models) { model in
-                                    Button {
-                                        Task { await appState.setSelectedModel(model) }
-                                    } label: {
-                                        if appState.selectedRuntime?.provider == model.provider,
-                                           appState.selectedRuntime?.modelID == model.modelID {
-                                            Label(model.shortLabel, systemImage: "checkmark")
-                                        } else {
-                                            Text(model.shortLabel)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Label(appState.selectedModelDisplayName, systemImage: "cpu")
-                }
-
-                Menu {
-                    ForEach(MobilePiAppState.thinkingLevels, id: \.self) { level in
-                        Button {
-                            Task { await appState.setSelectedThinkingLevel(level) }
-                        } label: {
-                            if appState.selectedThinkingLevel == level {
-                                Label(level, systemImage: "checkmark")
-                            } else {
-                                Text(level)
-                            }
-                        }
-                    }
-                } label: {
-                    Label(appState.selectedThinkingLevel, systemImage: "brain")
-                }
-
-                Divider()
-
-                Button("Refresh runtime") {
-                    Task { await appState.refreshSelectedRuntimeAndModels() }
-                }
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Text(appState.selectedSession?.title ?? "New Session")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.semibold))
-            }
-            .mobileBlobStyle(colorScheme: colorScheme)
-        }
-        .buttonStyle(.plain)
+    private var sessionTitlePill: some View {
+        Text(appState.selectedSession?.title ?? "New Session")
+            .font(.caption.weight(.semibold))
+            .lineLimit(1)
+            .mobileBlobStyle(colorScheme: resolvedColorScheme)
     }
 
-    private var groupedModels: [MobileModelGroup] {
-        Dictionary(grouping: appState.availableModels, by: \.provider)
-            .map { provider, models in
-                MobileModelGroup(
-                    provider: provider,
-                    models: models.sorted { $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending }
-                )
-            }
-            .sorted { $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending }
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 
     private func transcript(for session: PiSessionSummary) -> some View {
@@ -346,7 +316,7 @@ private struct MobileSessionDetailView: View {
                 .textFieldStyle(.plain)
                 .lineLimit(1...5)
                 .padding(.vertical, 8)
-                .foregroundStyle(MobileTheme.textColor(for: colorScheme))
+                .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
 
             MobileComposerIconButton(systemName: "mic.fill") {
                 appState.showStatus("Voice recording will use pi-appd transcription next.")
@@ -363,7 +333,7 @@ private struct MobileSessionDetailView: View {
         .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(MobileTheme.composerAreaBackgroundColor(for: colorScheme))
+                .fill(appState.appearance.composerAreaBackgroundColor(for: resolvedColorScheme))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -458,6 +428,7 @@ private struct MobileEventRow: View {
 
 private struct MessageBubble: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
     let message: Message
 
     var body: some View {
@@ -492,7 +463,7 @@ private struct MessageBubble: View {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 bubbleSurface {
-                    MarkdownMessageText(markdown: trimmed)
+                    MobileMarkdownText(trimmed)
                 }
             }
         case .thinking:
@@ -519,22 +490,34 @@ private struct MessageBubble: View {
     private var bubbleBackground: Color {
         switch message.role {
         case .user:
-            return MobileTheme.accentColor
+            return appState.appearance.userMessageBackgroundColor
         case .assistant:
-            return MobileTheme.assistantMessageBackgroundColor(for: colorScheme)
+            return appState.appearance.assistantMessageBackgroundColor(for: resolvedColorScheme)
         case .system:
-            return MobileTheme.assistantMessageBackgroundColor(for: colorScheme).opacity(0.72)
+            return appState.appearance.systemMessageBackgroundColor(for: resolvedColorScheme)
         }
     }
 
     private var bubbleTextColor: Color {
-        message.role == .user ? .black : MobileTheme.textColor(for: colorScheme)
+        switch message.role {
+        case .user:
+            return appState.appearance.userMessageTextColor
+        case .assistant, .system:
+            return appState.appearance.assistantMessageTextColor(for: resolvedColorScheme)
+        }
     }
 
     private var visibleBlocks: [ContentBlock] {
-        message.content.filter {
-            if case .thinking = $0 { return false }
-            return true
+        message.content.compactMap { block in
+            switch block {
+            case .thinking:
+                return nil
+            case .text(let rawText):
+                let visible = MobileMessageTextSanitizer.visibleText(from: rawText)
+                return visible.isEmpty ? nil : .text(visible)
+            case .image:
+                return block
+            }
         }
     }
 
@@ -552,22 +535,30 @@ private struct MessageBubble: View {
     private var shouldRenderRow: Bool {
         !thinkingText.isEmpty || !visibleBlocks.isEmpty
     }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
 }
 
-private struct MarkdownMessageText: View {
-    let markdown: String
-
-    var body: some View {
-        if let attributed = try? AttributedString(
-            markdown: markdown,
-            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .full)
-        ) {
-            Text(attributed)
-                .textSelection(.enabled)
-        } else {
-            Text(markdown)
-                .textSelection(.enabled)
-        }
+private enum MobileMessageTextSanitizer {
+    static func visibleText(from text: String) -> String {
+        let withoutSource = text.replacingOccurrences(
+            of: #"(?:^|\s)\[source:[^\]]+\]\s*"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        let withoutTelegramTopic = withoutSource.replacingOccurrences(
+            of: #"(?:^|\n)\[telegram_topic\][\s\S]*?\[/telegram_topic\]\n?"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        let collapsed = withoutTelegramTopic.replacingOccurrences(
+            of: #"\n{3,}"#,
+            with: "\n\n",
+            options: .regularExpression
+        )
+        return collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -609,6 +600,7 @@ private struct MobileThinkingSummaryView: View {
 
 private struct ToolBlock: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
     let title: String
     let sections: [(label: String, text: String)]
     var isError = false
@@ -657,7 +649,7 @@ private struct ToolBlock: View {
             .background {
                 if isExpanded {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(MobileTheme.controlTint(for: colorScheme, opacity: 0.06))
+                        .fill(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.06))
                 }
             }
             Spacer(minLength: 32)
@@ -678,50 +670,506 @@ private struct ToolBlock: View {
                 .padding(8)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(MobileTheme.controlTint(for: colorScheme, opacity: 0.05))
+                        .fill(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.05))
                 )
         }
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 }
 
 private struct MobileSettingsView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: MobilePiAppState
+    @State private var showsDefaultModelPicker = false
+    @State private var showsDefaultThinkingPicker = false
 
     var body: some View {
         Form {
-            Section("pi-appd") {
-                TextField("http://100.100.20.10:8787", text: $appState.daemonURL)
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    #endif
-                    .autocorrectionDisabled()
-                SecureField("Bearer token", text: $appState.daemonToken)
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .autocorrectionDisabled()
-            }
-
-            Section {
-                Button("Test Connection") {
-                    Task { await appState.testConnection() }
-                }
-                Button("Reload Catalog") {
-                    Task { await appState.reloadCatalog() }
-                }
-            }
-
+            appearanceSection
+            piDefaultsSection
+            remoteAPISection
             Section("Status") {
                 Text(appState.statusMessage)
                     .foregroundStyle(.secondary)
             }
         }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
+        .sheet(isPresented: $showsDefaultModelPicker) {
+            NavigationStack {
+                MobileDefaultModelPickerSheet()
+            }
+            .environmentObject(appState)
+        }
+        .sheet(isPresented: $showsDefaultThinkingPicker) {
+            NavigationStack {
+                MobileDefaultThinkingPickerSheet()
+            }
+            .environmentObject(appState)
+        }
+        .onAppear {
+            appState.refreshAvailableModelsCache()
+        }
+    }
+
+    private var appearanceSection: some View {
+        Section("Appearance") {
+            Picker("Mode", selection: Binding(
+                get: { appState.appearance.colorScheme },
+                set: { newValue in appState.updateAppearance { $0.colorScheme = newValue } }
+            )) {
+                ForEach(MobileAppColorSchemePreference.allCases) { scheme in
+                    Text(scheme.title).tag(scheme)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            ColorPicker("Accent", selection: Binding(
+                get: { appState.appearance.accentColor },
+                set: { newValue in appState.updateAppearance { $0.setAccentColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Main background", selection: Binding(
+                get: { appState.appearance.mainBackgroundColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setMainBackgroundColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Top bar", selection: Binding(
+                get: { appState.appearance.topBarBackgroundColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setTopBarBackgroundColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Sidebars background", selection: Binding(
+                get: { appState.appearance.sidebarBackgroundColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setSidebarBackgroundColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Composer area", selection: Binding(
+                get: { appState.appearance.composerAreaBackgroundColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setComposerAreaBackgroundColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Text", selection: Binding(
+                get: { appState.appearance.textColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setTextColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("User message", selection: Binding(
+                get: { appState.appearance.userMessageBackgroundColor },
+                set: { newValue in appState.updateAppearance { $0.setUserMessageBackgroundColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("User message text", selection: Binding(
+                get: { appState.appearance.userMessageTextColor },
+                set: { newValue in appState.updateAppearance { $0.setUserMessageTextColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Assistant message", selection: Binding(
+                get: { appState.appearance.assistantMessageBackgroundColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setAssistantMessageBackgroundColor(newValue) } }
+            ), supportsOpacity: false)
+
+            ColorPicker("Assistant message text", selection: Binding(
+                get: { appState.appearance.assistantMessageTextColor(for: resolvedColorScheme) },
+                set: { newValue in appState.updateAppearance { $0.setAssistantMessageTextColor(newValue) } }
+            ), supportsOpacity: false)
+
+            Button("Reset custom colors") {
+                appState.updateAppearance { $0.resetCustomColors() }
+            }
+
+            Toggle("Transparent titlebar", isOn: Binding(
+                get: { appState.appearance.useTransparentTitlebar },
+                set: { newValue in appState.updateAppearance { $0.useTransparentTitlebar = newValue } }
+            ))
+
+            TextField("Empty chat message", text: Binding(
+                get: { appState.appearance.emptyChatMessage },
+                set: { newValue in appState.updateAppearance { $0.emptyChatMessage = newValue } }
+            ))
+        }
+    }
+
+    private var piDefaultsSection: some View {
+        Section("Pi defaults") {
+            Button {
+                showsDefaultModelPicker = true
+                appState.refreshAvailableModelsCache()
+            } label: {
+                settingsValueRow(title: "Default model", value: appState.defaultModelDisplayName)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                showsDefaultThinkingPicker = true
+            } label: {
+                settingsValueRow(title: "Default thinking", value: appState.defaultThinkingDisplayName)
+            }
+            .buttonStyle(.plain)
+            .disabled(appState.defaultModelPreference == nil)
+
+            Button(appState.isLoadingAvailableModels ? "Loading models…" : "Refresh model list") {
+                appState.refreshAvailableModelsCache(force: true)
+            }
+            .disabled(appState.isLoadingAvailableModels)
+
+            Text("New sessions use this model explicitly. Existing sessions keep their current model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var remoteAPISection: some View {
+        Section("pi-appd") {
+            TextField("http://100.100.20.10:8787", text: $appState.daemonURL)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                #endif
+                .autocorrectionDisabled()
+            SecureField("Bearer token", text: $appState.daemonToken)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+
+            Button("Test Connection") {
+                Task { await appState.testConnection() }
+            }
+            Button("Reload Catalog") {
+                Task { await appState.reloadCatalog() }
+            }
+        }
+    }
+
+    private func settingsValueRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+            Spacer(minLength: 12)
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private struct MobileRuntimePill: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
+    let systemName: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.07))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private struct MobileModelPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+
+    var body: some View {
+        MobileModelList(
+            models: appState.selectableAvailableModels,
+            selectedID: appState.selectedModelID,
+            emptyMessage: appState.isLoadingAvailableModels ? "Loading models…" : "No pi models loaded.",
+            includesDaemonDefault: false,
+            onSelectDefault: nil,
+            onSelectModel: { model in
+                Task {
+                    await appState.setSelectedModel(model)
+                    dismiss()
+                }
+            }
+        )
+        .navigationTitle("Model")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .onAppear { appState.refreshAvailableModelsCache() }
+    }
+}
+
+private struct MobileDefaultModelPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+
+    var body: some View {
+        MobileModelList(
+            models: appState.cachedSelectableAvailableModels,
+            selectedID: appState.defaultModelPreference?.id,
+            emptyMessage: appState.isLoadingAvailableModels ? "Loading models…" : "No cached models yet. Refresh once to populate the picker.",
+            includesDaemonDefault: true,
+            onSelectDefault: {
+                appState.setDefaultModel(nil)
+                dismiss()
+            },
+            onSelectModel: { model in
+                appState.setDefaultModel(model)
+                dismiss()
+            }
+        )
+        .navigationTitle("Default model")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .onAppear { appState.refreshAvailableModelsCache() }
+    }
+}
+
+private struct MobileThinkingPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+
+    var body: some View {
+        MobileChoiceList(
+            title: "Thinking",
+            choices: MobilePiAppState.thinkingLevels,
+            selected: appState.selectedThinkingLevel,
+            includesDefault: false,
+            onSelect: { level in
+                Task {
+                    await appState.setSelectedThinkingLevel(level)
+                    dismiss()
+                }
+            },
+            onSelectDefault: nil
+        )
+    }
+}
+
+private struct MobileDefaultThinkingPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+
+    var body: some View {
+        MobileChoiceList(
+            title: "Default thinking",
+            choices: MobilePiAppState.thinkingLevels,
+            selected: appState.defaultModelPreference?.thinkingLevel,
+            includesDefault: true,
+            onSelect: { level in
+                appState.setDefaultThinkingLevel(level)
+                dismiss()
+            },
+            onSelectDefault: {
+                appState.setDefaultThinkingLevel(nil)
+                dismiss()
+            }
+        )
+    }
+}
+
+private struct MobileModelList: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
+    let models: [PiModelOption]
+    let selectedID: String?
+    let emptyMessage: String
+    let includesDaemonDefault: Bool
+    let onSelectDefault: (() -> Void)?
+    let onSelectModel: (PiModelOption) -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                if includesDaemonDefault, let onSelectDefault {
+                    MobileSelectionRow(
+                        title: "Use daemon default",
+                        subtitle: nil,
+                        isSelected: selectedID == nil,
+                        action: onSelectDefault
+                    )
+                }
+
+                if models.isEmpty {
+                    Text(emptyMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                } else {
+                    ForEach(groupedModels) { group in
+                        Text(group.provider)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                        ForEach(group.models) { model in
+                            MobileSelectionRow(
+                                title: model.shortLabel,
+                                subtitle: model.provider,
+                                isSelected: selectedID == model.id,
+                                action: { onSelectModel(model) }
+                            )
+                        }
+                    }
+                }
+
+                Button(appState.isLoadingAvailableModels ? "Loading models…" : "Refresh model list") {
+                    appState.refreshAvailableModelsCache(force: true)
+                }
+                .disabled(appState.isLoadingAvailableModels)
+                .buttonStyle(.bordered)
+                .padding(.top, 8)
+            }
+            .padding()
+        }
+        .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
+    }
+
+    private var groupedModels: [MobileModelGroup] {
+        Dictionary(grouping: models, by: \.provider)
+            .map { provider, models in
+                MobileModelGroup(
+                    provider: provider,
+                    models: models.sorted { $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending }
+                )
+            }
+            .sorted { $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending }
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private struct MobileChoiceList: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+    let title: String
+    let choices: [String]
+    let selected: String?
+    let includesDefault: Bool
+    let onSelect: (String) -> Void
+    let onSelectDefault: (() -> Void)?
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                if includesDefault, let onSelectDefault {
+                    MobileSelectionRow(
+                        title: "Use daemon default",
+                        subtitle: nil,
+                        isSelected: selected?.nilIfBlank == nil,
+                        action: onSelectDefault
+                    )
+                }
+
+                ForEach(choices, id: \.self) { choice in
+                    MobileSelectionRow(
+                        title: choice,
+                        subtitle: nil,
+                        isSelected: selected == choice,
+                        action: { onSelect(choice) }
+                    )
+                }
+            }
+            .padding()
+        }
+        .navigationTitle(title)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private struct MobileSelectionRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
+    let title: String
+    let subtitle: String?
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(appState.appearance.accentColor)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
+            .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: isSelected ? 0.14 : 0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 }
 
 private struct MobileSearchField: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
     @Binding var text: String
 
     var body: some View {
@@ -746,13 +1194,18 @@ private struct MobileSearchField: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(MobileTheme.controlTint(for: colorScheme, opacity: 0.06))
+        .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.06))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 }
 
 private struct MobileIconButton: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
     let systemName: String
     var help: String = ""
     var isDisabled = false
@@ -762,18 +1215,23 @@ private struct MobileIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(MobileTheme.accentColor.opacity(isDisabled ? 0.28 : 1))
+                .foregroundStyle(appState.appearance.accentColor.opacity(isDisabled ? 0.28 : 1))
                 .frame(width: 34, height: 34)
-                .background(MobileTheme.controlTint(for: colorScheme, opacity: 0.07))
+                .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.07))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .help(help)
     }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
 }
 
 private struct MobileComposerIconButton: View {
+    @EnvironmentObject private var appState: MobilePiAppState
     let systemName: String
     var isDisabled = false
     let action: () -> Void
@@ -782,7 +1240,7 @@ private struct MobileComposerIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(MobileTheme.accentColor.opacity(isDisabled ? 0.28 : 1))
+                .foregroundStyle(appState.appearance.accentColor.opacity(isDisabled ? 0.28 : 1))
                 .frame(width: 22, height: 30)
                 .contentShape(Rectangle())
         }
@@ -816,6 +1274,13 @@ private extension View {
         #else
         self
         #endif
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
