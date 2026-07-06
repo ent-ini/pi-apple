@@ -237,9 +237,10 @@ package enum SessionEventParser {
             return text.isEmpty ? nil : .text(text)
         }
         if type == "thinking" {
-            let thinking = (block["thinking"] as? String) ?? ""
-            let signature = (block["thinkingSignature"] as? String) ?? (block["signature"] as? String)
-            return .thinking(thinking, signature: signature)
+            let signatureValue = block["thinkingSignature"] ?? block["signature"]
+            let thinking = extractThinkingText(from: block, signatureValue: signatureValue)
+            let signature = stringifySignature(signatureValue)
+            return thinking.isEmpty ? nil : .thinking(thinking, signature: signature)
         }
         if type == "image" {
             let blockMime = (block["mimeType"] as? String) ?? (block["media_type"] as? String)
@@ -269,6 +270,66 @@ package enum SessionEventParser {
             return text.isEmpty ? nil : .text(text)
         }
         return nil
+    }
+
+    private static func extractThinkingText(from block: [String: Any], signatureValue: Any?) -> String {
+        if let thinking = (block["thinking"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !thinking.isEmpty {
+            return thinking
+        }
+
+        if let directSummary = summaryText(from: block["summary"]) {
+            return directSummary
+        }
+
+        if let signatureObject = signatureJSONObject(from: signatureValue),
+           let signatureSummary = summaryText(from: signatureObject["summary"]) {
+            return signatureSummary
+        }
+
+        return ""
+    }
+
+    private static func summaryText(from value: Any?) -> String? {
+        guard let blocks = value as? [[String: Any]] else { return nil }
+        let parts = blocks.compactMap { block -> String? in
+            guard (block["type"] as? String) == "summary_text",
+                  let text = (block["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else {
+                return nil
+            }
+            return text
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private static func signatureJSONObject(from value: Any?) -> [String: Any]? {
+        if let object = value as? [String: Any] {
+            return object
+        }
+        guard let text = value as? String,
+              let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    private static func stringifySignature(_ value: Any?) -> String? {
+        if let text = value as? String {
+            return text
+        }
+        guard let value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(
+                withJSONObject: value,
+                options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]
+              ),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return text
     }
 
     private static func parseToolCall(_ object: [String: Any]) -> ToolCall? {

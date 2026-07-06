@@ -34,7 +34,7 @@ public struct DefaultModelPreference: Hashable, Codable, Sendable {
     public var id: String { "\(provider)/\(modelID)" }
 }
 
-public struct SessionTokenTotals: Hashable, Sendable {
+public struct SessionTokenTotals: Hashable, Codable, Sendable {
     public let input: Int
     public let output: Int
     public let cacheRead: Int
@@ -52,7 +52,7 @@ public struct SessionTokenTotals: Hashable, Sendable {
     public static let zero = SessionTokenTotals(input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0)
 }
 
-public struct SessionContextUsage: Hashable, Sendable {
+public struct SessionContextUsage: Hashable, Codable, Sendable {
     public let tokens: Int?
     public let contextWindow: Int?
     public let percent: Double?
@@ -64,7 +64,7 @@ public struct SessionContextUsage: Hashable, Sendable {
     }
 }
 
-public struct SessionRuntimeState: Hashable, Sendable {
+public struct SessionRuntimeState: Hashable, Codable, Sendable {
     public let sessionID: String?
     public let sessionPath: String?
     public let provider: String?

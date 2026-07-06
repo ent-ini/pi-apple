@@ -1326,7 +1326,7 @@ private struct RuntimeContextUsage: Decodable {
     let percent: Double?
 }
 
-public struct SessionDefaultsSnapshot: Sendable {
+public struct SessionDefaultsSnapshot: Codable, Sendable {
     public let runtimeState: SessionRuntimeState
     public let availableModels: [PiModelOption]
 

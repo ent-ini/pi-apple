@@ -253,6 +253,41 @@ struct SessionEventParserToolResultTests {
     }
 
     @Test
+    func emptyThinkingFallsBackToSummaryTextInSignature() {
+        let raw = #"""
+        {"type":"message","id":"m2","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"**Considering context display**\\n\\nShow the max clearly.\"}]}"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"/tmp/a"}}]}}
+        """#
+
+        let events = SessionEventParser.parse(lines: [raw])
+
+        #expect(events.count == 2)
+        guard case .message(let message, _) = events[0] else {
+            Issue.record("Expected .message before tool call")
+            return
+        }
+        let thinking = message.content.compactMap { block -> String? in
+            if case .thinking(let text, _) = block { return text }
+            return nil
+        }
+        #expect(thinking == ["**Considering context display**\n\nShow the max clearly."])
+    }
+
+    @Test
+    func emptyThinkingWithoutSummaryStillStaysHidden() {
+        let raw = #"""
+        {"type":"message","id":"m3","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"{\"id\":\"rs_2\",\"type\":\"reasoning\",\"summary\":[]}"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"/tmp/a"}}]}}
+        """#
+
+        let events = SessionEventParser.parse(lines: [raw])
+
+        #expect(events.count == 1)
+        #expect({
+            if case .toolCall(let call, _) = events[0] { return call.id == "call-1" }
+            return false
+        }())
+    }
+
+    @Test
     func nonAssistantMessagesDoNotEmitInlineToolCallEvents() {
         // A user message that happens to contain a `toolCall` block in
         // its content array (it never should, but be defensive) must not

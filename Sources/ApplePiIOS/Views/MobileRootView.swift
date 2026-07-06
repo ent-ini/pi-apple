@@ -117,13 +117,13 @@ private struct MobileSessionListView: View {
                 LazyVStack(spacing: 0) {
                     ForEach(appState.filteredSessions) { session in
                         Button {
+                            appState.selectSession(session)
                             onOpenDetail()
-                            Task { await appState.selectSession(session) }
                         } label: {
                             MobileSessionRow(
                                 session: session,
                                 isSelected: appState.selectedSession?.id == session.id,
-                                isSending: session.isGenerating || (appState.isSending && appState.selectedSession?.id == session.id)
+                                isSending: session.isGenerating || appState.isSessionSending(session)
                             )
                         }
                         .buttonStyle(.plain)
@@ -189,6 +189,22 @@ private struct MobileSessionRow: View {
     }
 }
 
+private struct MobileScrollViewportPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct MobileScrollBottomPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct MobileSessionDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
@@ -203,6 +219,13 @@ private struct MobileSessionDetailView: View {
     @State private var showsFileImporter = false
     @State private var draftAttachments: [ChatAttachment] = []
     @State private var renameDraftTitle = ""
+    @State private var transcriptViewportHeight: CGFloat = 0
+    @State private var transcriptBottomMaxY: CGFloat = 0
+    @State private var isTranscriptPinnedToBottom = true
+
+    private static let transcriptCoordinateSpace = "MobileTranscriptScroll"
+    private static let transcriptBottomID = "MobileTranscriptBottom"
+    private static let transcriptAutoscrollBuffer: CGFloat = 24
 
     var body: some View {
         VStack(spacing: 0) {
@@ -318,6 +341,9 @@ private struct MobileSessionDetailView: View {
     private var sessionTitleMenu: some View {
         Menu {
             if appState.selectedSession == nil {
+                Button("Context: \(appState.defaultContextWindowDisplayName)") {}
+                    .disabled(true)
+
                 Button("Model: \(appState.defaultModelDisplayName)") {
                     showsDefaultModelPicker = true
                     appState.refreshAvailableModelsCache()
@@ -380,28 +406,60 @@ private struct MobileSessionDetailView: View {
                         MobileEventRow(row: row)
                             .id(row.id)
                     }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.transcriptBottomID)
+                        .background(
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: MobileScrollBottomPreferenceKey.self,
+                                    value: geometry.frame(in: .named(Self.transcriptCoordinateSpace)).maxY
+                                )
+                            }
+                        )
                 }
                 .padding()
             }
+            .coordinateSpace(name: Self.transcriptCoordinateSpace)
+            .background(
+                GeometryReader { geometry in
+                    Color.clear.preference(key: MobileScrollViewportPreferenceKey.self, value: geometry.size.height)
+                }
+            )
             .scrollContentBackground(.hidden)
             .overlay {
                 if appState.isLoadingSession && appState.selectedEvents.isEmpty {
                     ProgressView("Loading \(title)…")
                 }
             }
+            .onPreferenceChange(MobileScrollViewportPreferenceKey.self) { height in
+                transcriptViewportHeight = height
+                updateTranscriptPinnedState()
+            }
+            .onPreferenceChange(MobileScrollBottomPreferenceKey.self) { maxY in
+                transcriptBottomMaxY = maxY
+                updateTranscriptPinnedState()
+            }
             .onAppear {
-                scrollToBottom(rows: rows, proxy: proxy, animated: false)
+                isTranscriptPinnedToBottom = true
+                scrollToBottom(proxy: proxy, animated: false)
             }
             .onChange(of: scrollSignature) { _, _ in
-                scrollToBottom(rows: rows, proxy: proxy, animated: true)
+                guard isTranscriptPinnedToBottom else { return }
+                scrollToBottom(proxy: proxy, animated: true)
             }
         }
     }
 
-    private func scrollToBottom(rows: [MobileDisplayedRow], proxy: ScrollViewProxy, animated: Bool) {
-        guard let id = rows.last?.id else { return }
+    private func updateTranscriptPinnedState() {
+        guard transcriptViewportHeight > 0 else { return }
+        let distanceFromBottom = transcriptBottomMaxY - transcriptViewportHeight
+        isTranscriptPinnedToBottom = distanceFromBottom <= Self.transcriptAutoscrollBuffer
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
         let action = {
-            proxy.scrollTo(id, anchor: .bottom)
+            proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
         }
         if animated {
             withAnimation(.snappy) { action() }
@@ -426,7 +484,7 @@ private struct MobileSessionDetailView: View {
             }
 
             HStack(alignment: .bottom, spacing: 10) {
-                MobileComposerIconButton(systemName: "plus", isDisabled: appState.isSending) {
+                MobileComposerIconButton(systemName: "plus") {
                     showsFileImporter = true
                 }
 
@@ -478,7 +536,7 @@ private struct MobileSessionDetailView: View {
     }
 
     private var canSendDraft: Bool {
-        !appState.isSending && (!appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty)
+        !appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty
     }
 
     private func handleFileImporterResult(_ result: Result<[URL], Error>) {
@@ -601,7 +659,6 @@ private struct MobileComposerAttachmentPreview: View {
                     .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .disabled(appState.isSending)
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
@@ -1099,6 +1156,7 @@ private struct MobileSettingsView: View {
         }
         .onAppear {
             appState.refreshAvailableModelsCache()
+            Task { await appState.refreshSessionDefaultsCache(quietly: true) }
         }
     }
 
@@ -1198,6 +1256,8 @@ private struct MobileSettingsView: View {
 
     private var piDefaultsSection: some View {
         Section("Pi defaults") {
+            settingsValueRow(title: "Context window", value: appState.defaultContextWindowDisplayName, showsDisclosure: false)
+
             Button {
                 showsDefaultModelPicker = true
                 appState.refreshAvailableModelsCache()
@@ -1248,7 +1308,7 @@ private struct MobileSettingsView: View {
         }
     }
 
-    private func settingsValueRow(title: String, value: String) -> some View {
+    private func settingsValueRow(title: String, value: String, showsDisclosure: Bool = true) -> some View {
         HStack {
             Text(title)
                 .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
@@ -1257,9 +1317,11 @@ private struct MobileSettingsView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            if showsDisclosure {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 

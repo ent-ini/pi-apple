@@ -40,7 +40,9 @@ final class MobilePiAppState: ObservableObject {
     @Published private(set) var isLoadingCatalog = false
     @Published private(set) var isLoadingSession = false
     @Published private(set) var isSending = false
+    @Published private(set) var sendingSessionIDs: Set<String> = []
     @Published private(set) var selectedRuntime: SessionRuntimeState?
+    @Published private(set) var defaultRuntime: SessionRuntimeState?
     @Published private(set) var availableModels: [PiModelOption] = []
     @Published private(set) var cachedAvailableModels: [PiModelOption] = []
     @Published private(set) var isLoadingRuntime = false
@@ -52,20 +54,35 @@ final class MobilePiAppState: ObservableObject {
     static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
     private static let maxSelectedEventsRetained = 260
     private static let maxStoredTextCharacters = 50_000
+    private static let catalogStreamCoalesceDelay: Duration = .milliseconds(250)
+
+    private struct TurnStreamContext: Sendable {
+        let operationID: UUID
+        let initialSessionID: String?
+        let startedNewSession: Bool
+    }
 
     private let defaults: UserDefaults
     private let hostDefaultsKey = "ApplePiIOS.host"
     private let appearanceDefaultsKey = "ApplePi.appearance"
     private let modelDefaultsKey = "ApplePi.modelDefaults"
     private let availableModelsCacheDefaultsKey = "ApplePi.availableModelsCache"
+    private let sessionDefaultsCacheDefaultsKey = "ApplePi.sessionDefaultsCache"
     private var availableModelsCacheLoadedAt: Date?
+    private var sessionDefaultsCacheLoadedAt: Date?
     private var catalogStreamTask: Task<Void, Never>?
+    private var catalogStreamCoalesceTask: Task<Void, Never>?
+    private var pendingCatalogSessionUpdates: [PiSessionSummary] = []
     private var selectedSessionStreamTask: Task<Void, Never>?
     private var selectedSessionGeneration = UUID()
     private var selectedPersistedEventIDs = Set<String>()
     private var selectedLastLine: Int?
     private var isAppActive = true
     private var isChatVisible = false
+    private var isLoadingSessionDefaults = false
+    private var activeSendOperations = Set<UUID>()
+    private var sendOperationSessionIDs: [UUID: String] = [:]
+    private var selectedPendingNewSessionSendID: UUID?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -80,10 +97,12 @@ final class MobilePiAppState: ObservableObject {
         loadAppearance()
         loadModelDefaults()
         loadAvailableModelsCache()
+        loadSessionDefaultsCache()
     }
 
     deinit {
         catalogStreamTask?.cancel()
+        catalogStreamCoalesceTask?.cancel()
         selectedSessionStreamTask?.cancel()
     }
 
@@ -128,7 +147,11 @@ final class MobilePiAppState: ObservableObject {
     }
 
     var isSelectedSessionBusy: Bool {
-        isSending || isLoadingSession || isLoadingRuntime || (selectedSession?.isGenerating == true)
+        isLoadingSession
+            || isLoadingRuntime
+            || (selectedSession?.isGenerating == true)
+            || (selectedSession.map { isSessionSending($0) } ?? false)
+            || (selectedSession == nil && (selectedPendingNewSessionSendID.map { activeSendOperations.contains($0) } ?? false))
     }
 
     var selectableAvailableModels: [PiModelOption] {
@@ -140,13 +163,38 @@ final class MobilePiAppState: ObservableObject {
         Self.selectableModels(from: cachedAvailableModels)
     }
 
+    var defaultRuntimeForDisplay: SessionRuntimeState? {
+        guard let defaultRuntime else { return nil }
+        return runtime(defaultRuntime, applying: defaultModelPreference)
+    }
+
+    func isSessionSending(_ session: PiSessionSummary) -> Bool {
+        sendingSessionIDs.contains(session.id)
+    }
+
     var defaultModelDisplayName: String {
-        guard let defaultModelPreference else { return "Use daemon default" }
-        return defaultModelPreference.id
+        if let defaultModelPreference {
+            return defaultModelPreference.id
+        }
+        if let runtime = defaultRuntimeForDisplay {
+            return Self.modelDisplayName(provider: runtime.provider, modelID: runtime.modelID, fallback: runtime.modelDisplayName)
+        }
+        return "Use daemon default"
     }
 
     var defaultThinkingDisplayName: String {
-        defaultModelPreference?.thinkingLevel?.nilIfBlank ?? "Use daemon default"
+        if let thinking = defaultModelPreference?.thinkingLevel?.nilIfBlank {
+            return thinking
+        }
+        return defaultRuntimeForDisplay?.thinkingLevel.nilIfBlank ?? "Use daemon default"
+    }
+
+    var defaultContextWindowDisplayName: String {
+        guard let runtime = defaultRuntimeForDisplay else { return "unknown" }
+        if let window = runtime.contextUsage?.contextWindow {
+            return Self.compactTokenCount(window)
+        }
+        return Self.contextUsageDisplayName(runtime.contextUsage)
     }
 
     func loadInitialCatalogIfConfigured() async {
@@ -154,6 +202,7 @@ final class MobilePiAppState: ObservableObject {
         isAppActive = true
         await reloadCatalog()
         startCatalogStream()
+        await refreshSessionDefaultsCache(quietly: true)
         if isChatVisible {
             await catchUpSelectedSession(reason: "initial load")
             startSelectedSessionStreamIfPossible()
@@ -168,6 +217,7 @@ final class MobilePiAppState: ObservableObject {
             startCatalogStream()
             Task {
                 await reloadCatalog(quietly: true)
+                await refreshSessionDefaultsCache(quietly: true)
                 if self.isChatVisible {
                     await self.catchUpSelectedSession(reason: "foreground")
                     self.startSelectedSessionStreamIfPossible()
@@ -186,6 +236,9 @@ final class MobilePiAppState: ObservableObject {
         isChatVisible = visible
         if visible {
             Task {
+                if selectedSession == nil {
+                    await refreshSessionDefaultsCache(quietly: true)
+                }
                 await catchUpSelectedSession(reason: "chat visible")
                 startSelectedSessionStreamIfPossible()
             }
@@ -223,6 +276,7 @@ final class MobilePiAppState: ObservableObject {
                 activeProjectDirectory: nil,
                 tokenOverride: daemonToken.nilIfBlank
             )
+            flushPendingCatalogSessionUpdates()
             applyCatalog(snapshot)
             if !quietly {
                 statusMessage = "Loaded \(snapshot.projects.count) projects, \(snapshot.sessions.count) sessions."
@@ -261,22 +315,33 @@ final class MobilePiAppState: ObservableObject {
     private func stopCatalogStream() {
         catalogStreamTask?.cancel()
         catalogStreamTask = nil
+        catalogStreamCoalesceTask?.cancel()
+        catalogStreamCoalesceTask = nil
+        pendingCatalogSessionUpdates = []
     }
 
-    func selectSession(_ session: PiSessionSummary) async {
+    func selectSession(_ session: PiSessionSummary) {
+        selectedPendingNewSessionSendID = nil
+        stopSelectedSessionStream()
         selectedSession = session
         selectedRuntime = nil
         resetSelectedTranscript()
-        await reloadSelectedSession()
-        await refreshSelectedRuntimeAndModels()
+        isLoadingSession = true
+        Task {
+            await reloadSelectedSession()
+            await refreshSelectedRuntimeAndModels()
+        }
     }
 
     func startNewSession() {
+        selectedPendingNewSessionSendID = nil
         selectedSession = nil
-        selectedRuntime = nil
+        selectedRuntime = defaultRuntimeForDisplay
+        availableModels = cachedSelectableAvailableModels
         resetSelectedTranscript()
         stopSelectedSessionStream()
         statusMessage = "New session ready."
+        Task { await refreshSessionDefaultsCache(quietly: true) }
     }
 
     func reloadSelectedSession() async {
@@ -308,8 +373,11 @@ final class MobilePiAppState: ObservableObject {
 
     func refreshSelectedRuntimeAndModels() async {
         guard let sessionID = selectedSession?.id.nilIfBlank else {
-            selectedRuntime = nil
-            availableModels = []
+            selectedRuntime = defaultRuntimeForDisplay
+            availableModels = cachedSelectableAvailableModels
+            await refreshSessionDefaultsCache(quietly: true)
+            selectedRuntime = defaultRuntimeForDisplay
+            availableModels = cachedSelectableAvailableModels
             return
         }
         isLoadingRuntime = true
@@ -426,6 +494,9 @@ final class MobilePiAppState: ObservableObject {
                     self.isLoadingAvailableModels = false
                     if self.selectedSession != nil {
                         self.availableModels = Self.selectableModels(from: models)
+                    } else {
+                        self.availableModels = self.cachedSelectableAvailableModels
+                        self.selectedRuntime = self.defaultRuntimeForDisplay
                     }
                 }
             } catch {
@@ -434,6 +505,45 @@ final class MobilePiAppState: ObservableObject {
                     self.isLoadingAvailableModels = false
                     self.statusMessage = error.localizedDescription
                 }
+            }
+        }
+    }
+
+    func refreshSessionDefaultsCache(force: Bool = false, quietly: Bool = false) async {
+        guard isConfigured else {
+            if !quietly {
+                statusMessage = "Remote API URL is not configured."
+            }
+            return
+        }
+        if isLoadingSessionDefaults { return }
+        if !force,
+           defaultRuntime != nil,
+           let loadedAt = sessionDefaultsCacheLoadedAt,
+           Date().timeIntervalSince(loadedAt) < 5 * 60 {
+            return
+        }
+
+        isLoadingSessionDefaults = true
+        defer { isLoadingSessionDefaults = false }
+        let requestHost = host
+        let token = daemonToken.nilIfBlank
+        do {
+            let snapshot = try await RemoteDaemonClient().loadSessionDefaults(
+                host: requestHost,
+                workingDirectory: requestHost.defaultWorkingDirectory,
+                tokenOverride: token
+            )
+            guard host == requestHost else { return }
+            cacheSessionDefaults(snapshot)
+            if selectedSession == nil {
+                selectedRuntime = defaultRuntimeForDisplay
+                availableModels = cachedSelectableAvailableModels
+            }
+        } catch {
+            guard host == requestHost else { return }
+            if !quietly {
+                statusMessage = error.localizedDescription
             }
         }
     }
@@ -459,6 +569,10 @@ final class MobilePiAppState: ObservableObject {
     func setDefaultModelPreference(_ preference: DefaultModelPreference?) {
         defaultModelPreference = preference
         saveModelDefaults()
+        if selectedSession == nil {
+            selectedRuntime = defaultRuntimeForDisplay
+            availableModels = cachedSelectableAvailableModels
+        }
     }
 
     func updateAppearance(_ update: (inout MobileAppAppearance) -> Void) {
@@ -472,23 +586,32 @@ final class MobilePiAppState: ObservableObject {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !attachments.isEmpty else { return false }
         let effectivePrompt = prompt.isEmpty ? "Please inspect the attached item(s)." : prompt
-        let startsNewSession = selectedSession == nil
-        let sessionTitleForSource = selectedSession?.title ?? "New Session"
+        let initialSession = selectedSession
+        let initialSessionID = initialSession?.id.nilIfBlank
+        let startsNewSession = initialSessionID == nil
+        let sessionTitleForSource = initialSession?.title ?? "New Session"
         let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, sessionTitle: sessionTitleForSource)
+        let operationID = beginSendOperation(sessionID: initialSessionID)
+        let context = TurnStreamContext(
+            operationID: operationID,
+            initialSessionID: initialSessionID,
+            startedNewSession: startsNewSession
+        )
         draft = ""
         if startsNewSession {
+            selectedPendingNewSessionSendID = operationID
+            selectedRuntime = defaultRuntimeForDisplay
             resetSelectedTranscript()
         }
         appendOptimisticUserMessage(taggedPrompt, attachments: attachments)
-        isSending = true
-        defer { isSending = false }
+        defer { finishSendOperation(operationID) }
 
         let host = host
         do {
             let uploadedAttachments = try await uploadAttachmentsIfNeeded(attachments)
-            if let selectedSession {
-                try await RemoteDaemonClient().streamSend(host: host, sessionID: selectedSession.id, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
-                    await self.handleTurnStreamEvent(event)
+            if let sessionID = initialSessionID {
+                try await RemoteDaemonClient().streamSend(host: host, sessionID: sessionID, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
+                    await self.handleTurnStreamEvent(event, context: context)
                 }
             } else {
                 var request = PiLaunchRequest(workingDirectory: host.defaultWorkingDirectory)
@@ -500,28 +623,65 @@ final class MobilePiAppState: ObservableObject {
                     request.hasExplicitInitialThinkingLevel = defaultModelPreference.thinkingLevel?.nilIfBlank != nil
                 }
                 try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
-                    await self.handleTurnStreamEvent(event)
+                    await self.handleTurnStreamEvent(event, context: context)
                 }
             }
-            await catchUpSelectedSession(reason: "send complete")
+            await catchUpSendOperation(operationID, fallbackSessionID: initialSessionID, reason: "send complete")
             await reloadCatalog(quietly: true)
             startSelectedSessionStreamIfPossible()
             return true
         } catch {
             statusMessage = error.localizedDescription
-            await catchUpSelectedSession(reason: "send error")
+            await catchUpSendOperation(operationID, fallbackSessionID: initialSessionID, reason: "send error")
             startSelectedSessionStreamIfPossible()
             return false
         }
     }
 
+    private func beginSendOperation(sessionID: String?) -> UUID {
+        let operationID = UUID()
+        activeSendOperations.insert(operationID)
+        if let sessionID {
+            sendOperationSessionIDs[operationID] = sessionID
+        }
+        recomputeSendingState()
+        return operationID
+    }
+
+    private func bindSendOperation(_ operationID: UUID, to sessionID: String?) {
+        guard activeSendOperations.contains(operationID), let sessionID = sessionID?.nilIfBlank else { return }
+        sendOperationSessionIDs[operationID] = sessionID
+        recomputeSendingState()
+    }
+
+    private func finishSendOperation(_ operationID: UUID) {
+        activeSendOperations.remove(operationID)
+        sendOperationSessionIDs.removeValue(forKey: operationID)
+        if selectedPendingNewSessionSendID == operationID {
+            selectedPendingNewSessionSendID = nil
+        }
+        recomputeSendingState()
+    }
+
+    private func recomputeSendingState() {
+        isSending = !activeSendOperations.isEmpty
+        sendingSessionIDs = Set(sendOperationSessionIDs.values)
+    }
+
+    private func catchUpSendOperation(_ operationID: UUID, fallbackSessionID: String?, reason: String) async {
+        guard let sessionID = sendOperationSessionIDs[operationID] ?? fallbackSessionID else { return }
+        await catchUpSelectedSession(sessionID: sessionID, reason: reason)
+    }
+
     private func handleCatalogStreamEvent(_ event: CatalogStreamEvent) {
         switch event {
         case .snapshot(let snapshot):
+            flushPendingCatalogSessionUpdates()
             applyCatalog(snapshot)
         case .sessionUpdated(let session):
-            upsertSession(session)
+            enqueueCatalogSessionUpdate(session)
         case .sessionRemoved(let sessionId):
+            flushPendingCatalogSessionUpdates()
             removeSession(id: sessionId)
         case .runtimeChanged(let sessionId, let runtime):
             if selectedSession?.id == sessionId {
@@ -532,15 +692,43 @@ final class MobilePiAppState: ObservableObject {
         }
     }
 
-    private func handleTurnStreamEvent(_ event: PiTurnStreamEvent) async {
+    private func enqueueCatalogSessionUpdate(_ session: PiSessionSummary) {
+        pendingCatalogSessionUpdates.removeAll { $0.id == session.id }
+        pendingCatalogSessionUpdates.append(session)
+        guard catalogStreamCoalesceTask == nil else { return }
+        catalogStreamCoalesceTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.catalogStreamCoalesceDelay)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.flushPendingCatalogSessionUpdates()
+            }
+        }
+    }
+
+    private func flushPendingCatalogSessionUpdates() {
+        catalogStreamCoalesceTask?.cancel()
+        catalogStreamCoalesceTask = nil
+        guard !pendingCatalogSessionUpdates.isEmpty else { return }
+        let updates = pendingCatalogSessionUpdates
+        pendingCatalogSessionUpdates = []
+        for session in updates {
+            upsertSession(session)
+        }
+    }
+
+    private func handleTurnStreamEvent(_ event: PiTurnStreamEvent, context: TurnStreamContext) async {
         await MainActor.run {
             switch event {
             case .sessionBound(let binding):
+                bindSendOperation(context.operationID, to: binding.sessionID ?? binding.sessionPath)
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 bindSelectedSession(binding)
                 statusMessage = "Session: \(binding.title)"
                 startSelectedSessionStreamIfPossible()
                 Task { await refreshSelectedRuntimeAndModels() }
             case .sessionHeader(let meta):
+                bindSendOperation(context.operationID, to: meta.id)
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 if selectedSession == nil {
                     bindSelectedSession(
                         PiSessionBinding(
@@ -552,17 +740,30 @@ final class MobilePiAppState: ObservableObject {
                     )
                 }
             case .sessionEvents(let events, _):
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 mergeTransientEvents(events)
             case .turnEnd:
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 statusMessage = "Turn finished."
             case .agentEnd, .outputComplete:
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 statusMessage = "Done."
             case .abort:
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 statusMessage = "Aborted."
             case .streamError(let message):
+                guard shouldApplyTurnStreamEvent(context) else { return }
                 statusMessage = message
             }
         }
+    }
+
+    private func shouldApplyTurnStreamEvent(_ context: TurnStreamContext) -> Bool {
+        if let selectedSessionID = selectedSession?.id.nilIfBlank {
+            let operationSessionID = sendOperationSessionIDs[context.operationID] ?? context.initialSessionID
+            return operationSessionID == selectedSessionID
+        }
+        return context.startedNewSession && selectedPendingNewSessionSendID == context.operationID
     }
 
     private func bindSelectedSession(_ binding: PiSessionBinding) {
@@ -607,24 +808,32 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func applyCatalog(_ snapshot: PiCatalogSnapshot) {
-        projects = snapshot.projects.sorted { lhs, rhs in
+        let sortedProjects = snapshot.projects.sorted { lhs, rhs in
             (lhs.lastActivity ?? .distantPast) > (rhs.lastActivity ?? .distantPast)
         }
-        sessions = snapshot.sessions.sorted { $0.modifiedAt > $1.modifiedAt }
+        let sortedSessions = snapshot.sessions.sorted { $0.modifiedAt > $1.modifiedAt }
+        if projects != sortedProjects {
+            projects = sortedProjects
+        }
+        if sessions != sortedSessions {
+            sessions = sortedSessions
+        }
         if let selectedSession,
-           let updated = sessions.first(where: { $0.id == selectedSession.id }) {
+           let updated = sortedSessions.first(where: { $0.id == selectedSession.id }),
+           self.selectedSession != updated {
             self.selectedSession = updated
         }
     }
 
     private func upsertSession(_ session: PiSessionSummary) {
         if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            guard sessions[index] != session else { return }
             sessions[index] = session
         } else {
             sessions.append(session)
         }
         sessions.sort { $0.modifiedAt > $1.modifiedAt }
-        if selectedSession?.id == session.id {
+        if selectedSession?.id == session.id, selectedSession != session {
             selectedSession = session
         }
     }
@@ -639,10 +848,15 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func catchUpSelectedSession(reason: String) async {
+        guard let sessionID = selectedSession?.id.nilIfBlank else { return }
+        await catchUpSelectedSession(sessionID: sessionID, reason: reason)
+    }
+
+    private func catchUpSelectedSession(sessionID: String, reason: String) async {
         guard isAppActive,
               isChatVisible,
               isConfigured,
-              let sessionID = selectedSession?.id.nilIfBlank else { return }
+              selectedSession?.id == sessionID else { return }
         let after = selectedLastLine ?? -1
         do {
             let page = try await RemoteDaemonClient().loadSessionEventPage(
@@ -938,6 +1152,50 @@ final class MobilePiAppState: ObservableObject {
             }
     }
 
+    private func runtime(_ runtime: SessionRuntimeState, applying preference: DefaultModelPreference?) -> SessionRuntimeState {
+        let provider = preference?.provider.nilIfBlank ?? runtime.provider
+        let modelID = preference?.modelID.nilIfBlank ?? runtime.modelID
+        let thinkingLevel = preference?.thinkingLevel?.nilIfBlank ?? runtime.thinkingLevel
+        let matchingModel = cachedSelectableAvailableModels.first { model in
+            model.provider == provider && model.modelID == modelID
+        }
+        return SessionRuntimeState(
+            sessionID: runtime.sessionID,
+            sessionPath: runtime.sessionPath,
+            provider: provider,
+            modelID: modelID,
+            modelName: matchingModel?.name ?? runtime.modelName,
+            thinkingLevel: thinkingLevel,
+            tokens: runtime.tokens,
+            contextUsage: Self.contextUsage(runtime.contextUsage, applyingContextWindow: matchingModel?.contextWindow, tokens: runtime.tokens)
+        )
+    }
+
+    private static func contextUsage(
+        _ current: SessionContextUsage?,
+        applyingContextWindow contextWindow: Int?,
+        tokens totals: SessionTokenTotals
+    ) -> SessionContextUsage? {
+        let tokenCount = current?.tokens ?? (totals.total > 0 ? totals.total : 0)
+        let percent: Double?
+        if let contextWindow, contextWindow > 0 {
+            percent = Double(tokenCount) / Double(contextWindow) * 100
+        } else {
+            percent = current?.percent
+        }
+        return SessionContextUsage(
+            tokens: tokenCount,
+            contextWindow: contextWindow ?? current?.contextWindow,
+            percent: percent
+        )
+    }
+
+    private static func modelDisplayName(provider: String?, modelID: String?, fallback: String) -> String {
+        guard let modelID = modelID?.nilIfBlank else { return fallback }
+        guard let provider = provider?.nilIfBlank else { return modelID }
+        return "\(provider)/\(modelID)"
+    }
+
     private static func contextUsageDisplayName(_ usage: SessionContextUsage?) -> String {
         guard let usage else { return "unknown" }
         let used = compactTokenCount(usage.tokens)
@@ -960,13 +1218,16 @@ final class MobilePiAppState: ObservableObject {
         if text.range(of: #"^\[source:[^\]]+\]"#, options: .regularExpression) != nil {
             return text
         }
-        let model = selectedModelDisplayName.nilIfBlank ?? selectedSession?.latestModel ?? defaultModelPreference?.id ?? "unknown"
+        let model = selectedSession == nil
+            ? defaultModelDisplayName
+            : (selectedModelDisplayName.nilIfBlank ?? selectedSession?.latestModel ?? defaultModelPreference?.id ?? "unknown")
+        let thinking = selectedSession == nil ? defaultThinkingDisplayName : selectedThinkingLevel
         let fields = [
             "source:pi-ios-app",
             "type=text",
             "session=\"\(Self.sourceTagValue(sessionTitle))\"",
             "model=\"\(Self.sourceTagValue(model))\"",
-            "thinking=\"\(Self.sourceTagValue(selectedThinkingLevel))\""
+            "thinking=\"\(Self.sourceTagValue(thinking))\""
         ]
         return "[\(fields.joined(separator: " "))]\n\(text)"
     }
@@ -1035,6 +1296,13 @@ final class MobilePiAppState: ObservableObject {
         cachedAvailableModels = Self.selectableModels(from: models)
         availableModelsCacheLoadedAt = loadedAt
         saveAvailableModelsCache()
+        if defaultRuntime != nil {
+            saveSessionDefaultsCache()
+            if selectedSession == nil {
+                selectedRuntime = defaultRuntimeForDisplay
+                availableModels = cachedSelectableAvailableModels
+            }
+        }
     }
 
     private func saveAvailableModelsCache() {
@@ -1045,6 +1313,49 @@ final class MobilePiAppState: ObservableObject {
             return
         }
         defaults.set(data, forKey: availableModelsCacheDefaultsKey)
+    }
+
+    private struct SessionDefaultsCacheSnapshot: Codable {
+        let snapshot: SessionDefaultsSnapshot
+        let loadedAt: Date
+    }
+
+    private func loadSessionDefaultsCache() {
+        guard let data = defaults.data(forKey: sessionDefaultsCacheDefaultsKey),
+              let decoded = try? JSONDecoder().decode(SessionDefaultsCacheSnapshot.self, from: data) else {
+            return
+        }
+        defaultRuntime = decoded.snapshot.runtimeState
+        sessionDefaultsCacheLoadedAt = decoded.loadedAt
+        if !decoded.snapshot.availableModels.isEmpty {
+            cachedAvailableModels = Self.selectableModels(from: decoded.snapshot.availableModels)
+            availableModelsCacheLoadedAt = decoded.loadedAt
+        }
+        selectedRuntime = defaultRuntimeForDisplay
+        availableModels = cachedSelectableAvailableModels
+    }
+
+    private func cacheSessionDefaults(_ snapshot: SessionDefaultsSnapshot, loadedAt: Date = Date()) {
+        defaultRuntime = snapshot.runtimeState
+        sessionDefaultsCacheLoadedAt = loadedAt
+        if !snapshot.availableModels.isEmpty {
+            cacheAvailableModels(snapshot.availableModels, loadedAt: loadedAt)
+        }
+        saveSessionDefaultsCache()
+        selectedRuntime = selectedSession == nil ? defaultRuntimeForDisplay : selectedRuntime
+    }
+
+    private func saveSessionDefaultsCache() {
+        guard let defaultRuntime,
+              let loadedAt = sessionDefaultsCacheLoadedAt,
+              let data = try? JSONEncoder().encode(SessionDefaultsCacheSnapshot(
+                snapshot: SessionDefaultsSnapshot(runtimeState: defaultRuntime, availableModels: cachedAvailableModels),
+                loadedAt: loadedAt
+              )) else {
+            defaults.removeObject(forKey: sessionDefaultsCacheDefaultsKey)
+            return
+        }
+        defaults.set(data, forKey: sessionDefaultsCacheDefaultsKey)
     }
 
     private func saveHost() {

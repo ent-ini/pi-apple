@@ -38,11 +38,8 @@ struct ThinkingSummaryView: View {
             .help(isExpanded ? "Hide thinking" : "Show thinking")
 
             if isExpanded {
-                Text(thinkingText)
-                    .textSelection(.enabled)
-                    .font(.callout.monospaced())
+                MarkdownText(thinkingText)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
