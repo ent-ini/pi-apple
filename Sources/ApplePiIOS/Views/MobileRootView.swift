@@ -284,6 +284,14 @@ private struct MobileScrollBottomPreferenceKey: PreferenceKey {
     }
 }
 
+private struct MobileComposerHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct MobileSessionDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
@@ -302,6 +310,7 @@ private struct MobileSessionDetailView: View {
     @State private var isTranscribingAudio = false
     @State private var voiceTranscriptionTask: Task<Void, Never>?
     @State private var renameDraftTitle = ""
+    @State private var composerHeight: CGFloat = 0
     @State private var transcriptViewportHeight: CGFloat = 0
     @State private var transcriptBottomMaxY: CGFloat = 0
     @State private var isTranscriptPinnedToBottom = true
@@ -336,18 +345,21 @@ private struct MobileSessionDetailView: View {
 
             Divider().opacity(0.24)
 
-            if appState.selectedSession != nil || !appState.selectedEvents.isEmpty {
-                transcript(title: appState.selectedSession?.title ?? "New session")
-            } else {
-                ContentUnavailableView(
-                    "New session",
-                    systemImage: "message",
-                    description: Text("Type a prompt below to start a remote session.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            ZStack(alignment: .bottom) {
+                if appState.selectedSession != nil || !appState.selectedEvents.isEmpty {
+                    transcript(title: appState.selectedSession?.title ?? "New session")
+                } else {
+                    ContentUnavailableView(
+                        "New session",
+                        systemImage: "message",
+                        description: Text("Type a prompt below to start a remote session.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.bottom, composerHeight)
+                }
 
-            composer
+                composer
+            }
         }
         .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
         .padding(.bottom, keyboardObserver.visibleHeight)
@@ -519,7 +531,7 @@ private struct MobileSessionDetailView: View {
                                 .id(row.id)
                         }
                         Color.clear
-                            .frame(height: 1)
+                            .frame(height: transcriptBottomSpacerHeight)
                             .id(Self.transcriptBottomID)
                             .background(
                                 GeometryReader { geometry in
@@ -609,6 +621,10 @@ private struct MobileSessionDetailView: View {
                 .animation(.easeOut(duration: 0.16), value: showsScrollToBottomButton)
             }
         }
+    }
+
+    private var transcriptBottomSpacerHeight: CGFloat {
+        max(1, composerHeight + 10)
     }
 
     private func resetTranscriptScrollState() {
@@ -793,8 +809,17 @@ private struct MobileSessionDetailView: View {
         )
         .padding(.horizontal, 14)
         .padding(.top, 6)
-        .padding(.bottom, keyboardObserver.visibleHeight > 0 ? 0 : 8)
+        .padding(.bottom, keyboardObserver.visibleHeight > 0 ? 6 : 8)
         .frame(maxWidth: .infinity)
+        .background(
+            GeometryReader { geometry in
+                Color.clear.preference(key: MobileComposerHeightPreferenceKey.self, value: geometry.size.height)
+            }
+        )
+        .onPreferenceChange(MobileComposerHeightPreferenceKey.self) { height in
+            guard height > 0, abs(composerHeight - height) > 0.5 else { return }
+            composerHeight = height
+        }
     }
 
     private var canSendDraft: Bool {
