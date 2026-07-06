@@ -229,16 +229,21 @@ private final class MobileKeyboardObserver: NSObject, ObservableObject, @uncheck
             visibleHeight = 0
             return
         }
-        visibleHeight = Self.keyboardOverlapHeight(for: endFrame)
+        visibleHeight = Self.additionalKeyboardInset(for: endFrame)
     }
 
-    private static func keyboardOverlapHeight(for endFrame: CGRect) -> CGFloat {
+    private static func additionalKeyboardInset(for endFrame: CGRect) -> CGFloat {
         guard let window = activeKeyWindow() else {
             return max(0, UIScreen.main.bounds.maxY - endFrame.minY)
         }
         let convertedFrame = window.convert(endFrame, from: nil)
         guard convertedFrame.isFinite else { return 0 }
-        return max(0, window.bounds.intersection(convertedFrame).height)
+        let overlapHeight = window.bounds.intersection(convertedFrame).height
+        // The SwiftUI view is still laid out inside the regular bottom safe
+        // area. Only add the keyboard overlap beyond that safe-area inset;
+        // otherwise the composer floats above the keyboard by the home-indicator
+        // height.
+        return max(0, overlapHeight - window.safeAreaInsets.bottom)
     }
 
     private static func activeKeyWindow() -> UIWindow? {
