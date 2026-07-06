@@ -314,6 +314,7 @@ private struct MobileSessionDetailView: View {
     @State private var transcriptViewportHeight: CGFloat = 0
     @State private var transcriptBottomMaxY: CGFloat = 0
     @State private var isTranscriptPinnedToBottom = true
+    @State private var isTranscriptDetachedByUser = false
     @State private var stickyAutoScrollUntil: Date?
     @State private var hasCompletedInitialScrollPlacement = false
     @State private var bottomScrollWorkItems: [DispatchWorkItem] = []
@@ -333,7 +334,7 @@ private struct MobileSessionDetailView: View {
     private static let stickyAutoScrollDuration: TimeInterval = 30
     private static let recentUserScrollDuration: TimeInterval = 0.9
     private static let userScrollBreakawayDistance: CGFloat = 12
-    private static let transcriptScrollSettleDelays: [TimeInterval] = [0.0, 0.08, 0.22]
+    private static let transcriptScrollSettleDelays: [TimeInterval] = [0.0, 0.12]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -521,7 +522,7 @@ private struct MobileSessionDetailView: View {
 
     private func transcript(title: String) -> some View {
         let rows = MobileDisplayedRow.groupingToolResults(in: appState.filteredVisibleEvents)
-        let scrollSignature = rows.map(\.scrollFingerprint).joined(separator: "|")
+        let scrollSignature = "\(rows.count):\(rows.last?.scrollFingerprint ?? "empty")"
         return GeometryReader { viewportProxy in
             ScrollViewReader { proxy in
                 ScrollView {
@@ -599,6 +600,7 @@ private struct MobileSessionDetailView: View {
                     if showsScrollToBottomButton {
                         Button {
                             isTranscriptPinnedToBottom = true
+                            isTranscriptDetachedByUser = false
                             showsScrollToBottomButton = false
                             startStickyAutoScroll()
                             scrollToBottomSettled(proxy: proxy, animated: true, completesInitialPlacement: false)
@@ -630,6 +632,7 @@ private struct MobileSessionDetailView: View {
     private func resetTranscriptScrollState() {
         cancelBottomScrollWorkItems()
         isTranscriptPinnedToBottom = true
+        isTranscriptDetachedByUser = false
         stickyAutoScrollUntil = Date().addingTimeInterval(Self.stickyAutoScrollDuration)
         hasCompletedInitialScrollPlacement = false
         showsScrollToBottomButton = false
@@ -661,6 +664,7 @@ private struct MobileSessionDetailView: View {
         // otherwise streaming responses keep snapping the transcript back down.
         stickyAutoScrollUntil = nil
         isTranscriptPinnedToBottom = false
+        isTranscriptDetachedByUser = true
         cancelBottomScrollWorkItems()
     }
 
@@ -680,10 +684,12 @@ private struct MobileSessionDetailView: View {
                distanceFromBottom > Self.userScrollBreakawayDistance {
                 stickyAutoScrollUntil = nil
                 isTranscriptPinnedToBottom = false
+                isTranscriptDetachedByUser = true
                 cancelBottomScrollWorkItems()
                 return
             }
             isTranscriptPinnedToBottom = true
+            isTranscriptDetachedByUser = false
             if distanceFromBottom > Self.transcriptBottomReachedEpsilon,
                bottomScrollWorkItems.isEmpty {
                 scrollToBottomSettled(
@@ -695,7 +701,11 @@ private struct MobileSessionDetailView: View {
             return
         }
 
-        isTranscriptPinnedToBottom = distanceFromBottom <= Self.transcriptAutoscrollBuffer
+        let isNearBottom = distanceFromBottom <= Self.transcriptAutoscrollBuffer
+        isTranscriptPinnedToBottom = isNearBottom
+        if isNearBottom {
+            isTranscriptDetachedByUser = false
+        }
     }
 
     private func updateScrollToBottomButton(distanceFromBottom: CGFloat) {
@@ -707,7 +717,8 @@ private struct MobileSessionDetailView: View {
     }
 
     private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
-        guard isTranscriptPinnedToBottom || isStickyAutoScrollActive else { return }
+        let shouldFollowLiveTail = isTranscriptPinnedToBottom || isStickyAutoScrollActive || !isTranscriptDetachedByUser
+        guard shouldFollowLiveTail else { return }
         startStickyAutoScroll()
         guard bottomScrollWorkItems.isEmpty else { return }
         scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
