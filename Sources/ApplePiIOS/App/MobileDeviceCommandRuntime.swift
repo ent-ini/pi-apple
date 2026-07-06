@@ -22,7 +22,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     private let deviceInfoSnapshot: [String: String]
     private var streamTask: Task<Void, Never>?
 
-    static let runtimeVersion = "device-js.v6-polling-jobs"
+    static let runtimeVersion = "device-js.v7-jsc-timeout-worker"
 
     static let capabilities = [
         runtimeVersion,
@@ -161,15 +161,14 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
                 logs: ["timeoutSeconds=\(timeoutSeconds)", "directReturnFallback=true"]
             )
         }
-        // JavaScriptCore on iOS should be driven from the app's main actor.
-        // Jobs are trusted and short-lived, so blocking the UI briefly is an
-        // acceptable MVP trade-off and avoids background-executor hangs.
-        return await MainActor.run {
-            MobileJavaScriptExecutor(deviceInfo: deviceInfoSnapshot).run(
+        let deviceInfoSnapshot = deviceInfoSnapshot
+        return await Task.detached(priority: .userInitiated) {
+            MobileJavaScriptExecutor.runWithTimeout(
                 script: job.script,
-                timeoutSeconds: timeoutSeconds
+                timeoutSeconds: timeoutSeconds,
+                deviceInfo: deviceInfoSnapshot
             )
-        }
+        }.value
     }
 }
 
@@ -285,6 +284,23 @@ private final class MobileHTTPTextResponseBox: @unchecked Sendable {
     }
 }
 
+private final class MobileJavaScriptResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: MobileDeviceScriptExecutionResult?
+
+    func store(_ result: MobileDeviceScriptExecutionResult) {
+        lock.lock()
+        self.result = result
+        lock.unlock()
+    }
+
+    func snapshot() -> MobileDeviceScriptExecutionResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        return result
+    }
+}
+
 private final class MobileJavaScriptExecutor {
     private let deviceInfo: [String: String]
 
@@ -292,8 +308,34 @@ private final class MobileJavaScriptExecutor {
         self.deviceInfo = deviceInfo
     }
 
+    static func runWithTimeout(script: String, timeoutSeconds: Int, deviceInfo: [String: String]) -> MobileDeviceScriptExecutionResult {
+        let timeout = max(1, min(timeoutSeconds, 300))
+        let box = MobileJavaScriptResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            let result = MobileJavaScriptExecutor(deviceInfo: deviceInfo).run(script: script, timeoutSeconds: timeout)
+            box.store(result)
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + .seconds(timeout)) == .timedOut {
+            return MobileDeviceScriptExecutionResult(
+                ok: false,
+                resultJSON: nil,
+                error: "JavaScript execution timed out after \(timeout)s",
+                logs: ["timeoutSeconds=\(timeout)", "jscTimeout=true"]
+            )
+        }
+        return box.snapshot() ?? MobileDeviceScriptExecutionResult(
+            ok: false,
+            resultJSON: nil,
+            error: "JavaScript execution finished without result",
+            logs: ["timeoutSeconds=\(timeout)"]
+        )
+    }
+
     func run(script: String, timeoutSeconds: Int) -> MobileDeviceScriptExecutionResult {
         var logs = ["timeoutSeconds=\(timeoutSeconds)"]
+        logs.append("jscWorker=true")
         guard let context = JSContext(virtualMachine: JSVirtualMachine()) else {
             return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "Could not create JavaScript context", logs: logs)
         }
