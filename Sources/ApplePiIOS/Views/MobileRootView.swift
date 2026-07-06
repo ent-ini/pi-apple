@@ -446,7 +446,10 @@ private struct MobileSessionDetailView: View {
                 }
             )
             .scrollContentBackground(.hidden)
-            .mobileScrollDismissesKeyboardInteractively()
+            .contentShape(Rectangle())
+            .mobileScrollDismissesKeyboardImmediately()
+            .simultaneousGesture(dismissKeyboardTapGesture)
+            .simultaneousGesture(dismissKeyboardDragGesture)
             .overlay {
                 if appState.isLoadingSession && appState.selectedEvents.isEmpty {
                     ProgressView("Loading \(title)…")
@@ -575,12 +578,26 @@ private struct MobileSessionDetailView: View {
         !appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty
     }
 
+    private var dismissKeyboardTapGesture: some Gesture {
+        TapGesture()
+            .onEnded {
+                guard isComposerFocused else { return }
+                dismissKeyboard()
+            }
+    }
+
     private var dismissKeyboardDragGesture: some Gesture {
-        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onChanged { value in
+                guard isComposerFocused,
+                      value.translation.height > 8,
+                      abs(value.translation.width) < value.translation.height * 1.4 else { return }
+                dismissKeyboard()
+            }
             .onEnded { value in
                 guard isComposerFocused,
-                      value.translation.height > 40,
-                      abs(value.translation.width) < value.translation.height else { return }
+                      value.translation.height > 24,
+                      abs(value.translation.width) < value.translation.height * 1.4 else { return }
                 dismissKeyboard()
             }
     }
@@ -2315,9 +2332,9 @@ private extension View {
     }
 
     @ViewBuilder
-    func mobileScrollDismissesKeyboardInteractively() -> some View {
+    func mobileScrollDismissesKeyboardImmediately() -> some View {
         #if os(iOS)
-        scrollDismissesKeyboard(.interactively)
+        scrollDismissesKeyboard(.immediately)
         #else
         self
         #endif
