@@ -335,6 +335,7 @@ private struct MobileSessionDetailView: View {
     private static let recentUserScrollDuration: TimeInterval = 0.9
     private static let userScrollBreakawayDistance: CGFloat = 12
     private static let transcriptScrollSettleDelays: [TimeInterval] = [0.0, 0.12]
+    private static let transcriptKeyboardScrollSettleDelays: [TimeInterval] = [0.0, 0.12, 0.28, 0.45]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -367,7 +368,6 @@ private struct MobileSessionDetailView: View {
         .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .animation(.easeOut(duration: keyboardObserver.animationDuration), value: keyboardObserver.visibleHeight)
-        .simultaneousGesture(dismissKeyboardDragGesture)
         .hiddenMobileNavigationBar()
         .task(id: appState.selectedSession?.id) {
             await appState.refreshSelectedRuntimeAndModels()
@@ -522,7 +522,7 @@ private struct MobileSessionDetailView: View {
 
     private func transcript(title: String) -> some View {
         let rows = MobileDisplayedRow.groupingToolResults(in: appState.filteredVisibleEvents)
-        let scrollSignature = "\(rows.count):\(rows.last?.scrollFingerprint ?? "empty")"
+        let scrollSignature = "\(rows.count):\(rows.last?.scrollFingerprint ?? "empty"):\(Int(transcriptBottomSpacerHeight.rounded()))"
         return GeometryReader { viewportProxy in
             ScrollViewReader { proxy in
                 ScrollView {
@@ -554,9 +554,8 @@ private struct MobileSessionDetailView: View {
                 )
                 .scrollContentBackground(.hidden)
                 .contentShape(Rectangle())
-                .mobileScrollDismissesKeyboardImmediately()
+                .mobileScrollKeepsKeyboardVisible()
                 .simultaneousGesture(dismissKeyboardTapGesture)
-                .simultaneousGesture(dismissKeyboardDragGesture)
                 .simultaneousGesture(transcriptUserScrollGesture)
                 .overlay {
                     if appState.isLoadingSession && appState.selectedEvents.isEmpty {
@@ -590,8 +589,9 @@ private struct MobileSessionDetailView: View {
                 .onChange(of: keyboardObserver.visibleHeight) { oldHeight, newHeight in
                     guard newHeight > oldHeight,
                           isTranscriptPinnedToBottom || isComposerFocused else { return }
+                    isTranscriptDetachedByUser = false
                     startStickyAutoScroll()
-                    scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
+                    scrollToBottomForKeyboard(proxy: proxy)
                 }
                 .onChange(of: scrollSignature) { _, _ in
                     scrollToBottomIfNeeded(proxy: proxy)
@@ -626,7 +626,7 @@ private struct MobileSessionDetailView: View {
     }
 
     private var transcriptBottomSpacerHeight: CGFloat {
-        max(1, composerHeight + 10)
+        max(1, composerHeight + 18)
     }
 
     private func resetTranscriptScrollState() {
@@ -724,6 +724,15 @@ private struct MobileSessionDetailView: View {
         scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
     }
 
+    private func scrollToBottomForKeyboard(proxy: ScrollViewProxy) {
+        scrollToBottomSettled(
+            proxy: proxy,
+            animated: false,
+            completesInitialPlacement: !hasCompletedInitialScrollPlacement,
+            delays: Self.transcriptKeyboardScrollSettleDelays
+        )
+    }
+
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
         let action = {
             proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
@@ -735,16 +744,22 @@ private struct MobileSessionDetailView: View {
         }
     }
 
-    private func scrollToBottomSettled(proxy: ScrollViewProxy, animated: Bool, completesInitialPlacement: Bool) {
+    private func scrollToBottomSettled(
+        proxy: ScrollViewProxy,
+        animated: Bool,
+        completesInitialPlacement: Bool,
+        delays: [TimeInterval] = Self.transcriptScrollSettleDelays
+    ) {
         cancelBottomScrollWorkItems()
         bottomScrollGeneration &+= 1
         let generation = bottomScrollGeneration
+        let settleDelays = delays.isEmpty ? [0] : delays
 
-        let workItems = Self.transcriptScrollSettleDelays.enumerated().map { index, delay in
+        let workItems = settleDelays.enumerated().map { index, delay in
             let item = DispatchWorkItem {
                 guard bottomScrollGeneration == generation else { return }
                 scrollToBottom(proxy: proxy, animated: animated && index == 0)
-                if index == Self.transcriptScrollSettleDelays.count - 1 {
+                if index == settleDelays.count - 1 {
                     if completesInitialPlacement {
                         hasCompletedInitialScrollPlacement = true
                     }
@@ -841,22 +856,6 @@ private struct MobileSessionDetailView: View {
         TapGesture()
             .onEnded {
                 guard isComposerFocused else { return }
-                dismissKeyboard()
-            }
-    }
-
-    private var dismissKeyboardDragGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .local)
-            .onChanged { value in
-                guard isComposerFocused,
-                      value.translation.height > 8,
-                      abs(value.translation.width) < value.translation.height * 1.4 else { return }
-                dismissKeyboard()
-            }
-            .onEnded { value in
-                guard isComposerFocused,
-                      value.translation.height > 24,
-                      abs(value.translation.width) < value.translation.height * 1.4 else { return }
                 dismissKeyboard()
             }
     }
@@ -2591,9 +2590,9 @@ private extension View {
     }
 
     @ViewBuilder
-    func mobileScrollDismissesKeyboardImmediately() -> some View {
+    func mobileScrollKeepsKeyboardVisible() -> some View {
         #if os(iOS)
-        scrollDismissesKeyboard(.immediately)
+        scrollDismissesKeyboard(.never)
         #else
         self
         #endif
