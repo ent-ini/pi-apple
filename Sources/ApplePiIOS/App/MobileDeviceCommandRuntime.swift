@@ -1,5 +1,8 @@
 import Foundation
 import JavaScriptCore
+#if canImport(Network)
+import Network
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -22,7 +25,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     private let deviceInfoSnapshot: [String: String]
     private var streamTask: Task<Void, Never>?
 
-    static let runtimeVersion = "device-js.v7-jsc-timeout-worker"
+    static let runtimeVersion = "device-js.v8-http-clipboard-tcp"
 
     static let capabilities = [
         runtimeVersion,
@@ -30,6 +33,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
         "pi.device.info",
         "pi.app.info",
         "pi.net.httpText",
+        "pi.net.tcpCheck",
         "pi.clipboard.readWrite",
         "pi.log"
     ]
@@ -284,6 +288,39 @@ private final class MobileHTTPTextResponseBox: @unchecked Sendable {
     }
 }
 
+private final class MobileTCPCheckBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var didFinish = false
+    private var ok = false
+    private var error: String?
+    private var durationMs = 0
+
+    func finish(ok: Bool, error: String?, durationMs: Int) {
+        lock.lock()
+        guard !didFinish else {
+            lock.unlock()
+            return
+        }
+        didFinish = true
+        self.ok = ok
+        self.error = error
+        self.durationMs = durationMs
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait(timeoutSeconds: Double) -> Bool {
+        semaphore.wait(timeout: .now() + timeoutSeconds) == .success
+    }
+
+    func snapshot() -> (ok: Bool, error: String?, durationMs: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (ok, error, durationMs)
+    }
+}
+
 private final class MobileJavaScriptResultBox: @unchecked Sendable {
     private let lock = NSLock()
     private var result: MobileDeviceScriptExecutionResult?
@@ -343,6 +380,22 @@ private final class MobileJavaScriptExecutor {
         context.exceptionHandler = { _, exception in
             exceptionMessage = exception?.toString()
         }
+        let httpTextBlock: @convention(block) (String) -> NSDictionary = { url in
+            Self.httpText(url)
+        }
+        let tcpCheckBlock: @convention(block) (String, Int32, Double) -> NSDictionary = { host, port, timeout in
+            Self.tcpCheck(host: host, port: Int(port), timeoutSeconds: timeout)
+        }
+        let clipboardTextBlock: @convention(block) () -> String? = {
+            Self.clipboardText()
+        }
+        let setClipboardTextBlock: @convention(block) (String) -> Void = { text in
+            Self.setClipboardText(text)
+        }
+        context.setObject(httpTextBlock, forKeyedSubscript: "__piHttpText" as NSString)
+        context.setObject(tcpCheckBlock, forKeyedSubscript: "__piTcpCheck" as NSString)
+        context.setObject(clipboardTextBlock, forKeyedSubscript: "__piClipboardText" as NSString)
+        context.setObject(setClipboardTextBlock, forKeyedSubscript: "__piSetClipboardText" as NSString)
         context.evaluateScript(Self.bootstrapScript(deviceInfo: deviceInfo, appInfo: Self.currentAppInfo()))
 
         let wrapped = """
@@ -379,14 +432,99 @@ private final class MobileJavaScriptExecutor {
             info: function() { return \(appJSON); }
           },
           net: {
-            httpText: function(url) { throw new Error("pi.net.httpText is not available in this MVP build yet"); }
+            httpText: function(url) { return __piHttpText(String(url)); },
+            tcpCheck: function(host, port, timeoutSeconds) { return __piTcpCheck(String(host), Number(port), Number(timeoutSeconds || 5)); }
           },
           clipboard: {
-            text: function() { return null; },
-            setText: function(text) { throw new Error("pi.clipboard.setText is not available in this MVP build yet"); }
+            text: function() { return __piClipboardText(); },
+            setText: function(text) { __piSetClipboardText(String(text)); return true; }
           }
         };
         """
+    }
+
+    private static func httpText(_ url: String) -> NSDictionary {
+        guard let requestURL = URL(string: url) else {
+            return ["ok": false, "error": "invalid URL"] as NSDictionary
+        }
+        var request = URLRequest(url: requestURL)
+        request.timeoutInterval = 30
+        let semaphore = DispatchSemaphore(value: 0)
+        let responseBox = MobileHTTPTextResponseBox()
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            responseBox.store(data: data, response: response, error: error)
+            semaphore.signal()
+        }.resume()
+        if semaphore.wait(timeout: .now() + 35) == .timedOut {
+            return ["ok": false, "error": "timeout"] as NSDictionary
+        }
+        let snapshot = responseBox.snapshot()
+        if let errorMessage = snapshot.errorMessage {
+            return ["ok": false, "status": snapshot.status, "headers": snapshot.headers, "error": errorMessage] as NSDictionary
+        }
+        return ["ok": true, "status": snapshot.status, "headers": snapshot.headers, "text": snapshot.body] as NSDictionary
+    }
+
+    private static func tcpCheck(host: String, port: Int, timeoutSeconds: Double) -> NSDictionary {
+        #if canImport(Network)
+        let timeout = max(0.5, min(timeoutSeconds, 30))
+        let box = MobileTCPCheckBox()
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(max(0, min(port, 65_535)))) else {
+            return ["ok": false, "error": "invalid port"] as NSDictionary
+        }
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        let started = Date()
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                box.finish(ok: true, error: nil, durationMs: Int(Date().timeIntervalSince(started) * 1000))
+                connection.cancel()
+            case .failed(let error):
+                box.finish(ok: false, error: error.localizedDescription, durationMs: Int(Date().timeIntervalSince(started) * 1000))
+                connection.cancel()
+            case .cancelled:
+                break
+            default:
+                break
+            }
+        }
+        connection.start(queue: DispatchQueue.global(qos: .utility))
+        if !box.wait(timeoutSeconds: timeout) {
+            connection.cancel()
+            return ["ok": false, "host": host, "port": port, "error": "timeout", "durationMs": Int(Date().timeIntervalSince(started) * 1000)] as NSDictionary
+        }
+        let snapshot = box.snapshot()
+        return [
+            "ok": snapshot.ok,
+            "host": host,
+            "port": port,
+            "durationMs": snapshot.durationMs,
+            "error": snapshot.error as Any
+        ] as NSDictionary
+        #else
+        return ["ok": false, "host": host, "port": port, "error": "Network framework unavailable"] as NSDictionary
+        #endif
+    }
+
+    private static func clipboardText() -> String? {
+        #if canImport(UIKit)
+        if Thread.isMainThread {
+            return UIPasteboard.general.string
+        }
+        return DispatchQueue.main.sync { UIPasteboard.general.string }
+        #else
+        return nil
+        #endif
+    }
+
+    private static func setClipboardText(_ text: String) {
+        #if canImport(UIKit)
+        if Thread.isMainThread {
+            UIPasteboard.general.string = text
+        } else {
+            DispatchQueue.main.sync { UIPasteboard.general.string = text }
+        }
+        #endif
     }
 
     private static func currentAppInfo() -> [String: String] {
