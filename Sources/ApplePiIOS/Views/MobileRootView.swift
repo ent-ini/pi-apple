@@ -982,7 +982,10 @@ private struct MobileSettingsView: View {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(MobileAppearanceColorTransfer(appState.appearance))
+            let data = try encoder.encode(MobileAppearanceColorTransfer(
+                appState.appearance,
+                resolvedColorScheme: appState.appearance.resolvedColorScheme(current: colorScheme)
+            ))
             guard let text = String(data: data, encoding: .utf8) else {
                 appearanceClipboardStatus = "Could not encode colors."
                 return
@@ -1020,7 +1023,7 @@ private struct MobileSettingsView: View {
 }
 
 private struct MobileAppearanceColorTransfer: Codable {
-    var accentColorValue: MobileCodableAccentColor
+    var accentColorValue: MobileCodableAccentColor?
     var mainBackgroundColorValue: MobileCodableAccentColor?
     var topBarBackgroundColorValue: MobileCodableAccentColor?
     var sidebarBackgroundColorValue: MobileCodableAccentColor?
@@ -1030,34 +1033,39 @@ private struct MobileAppearanceColorTransfer: Codable {
     var userMessageTextColorValue: MobileCodableAccentColor?
     var assistantMessageBackgroundColorValue: MobileCodableAccentColor?
     var assistantMessageTextColorValue: MobileCodableAccentColor?
-    var colorScheme: MobileAppColorSchemePreference
+    var colorScheme: MobileAppColorSchemePreference?
 
-    init(_ appearance: MobileAppAppearance) {
+    init(_ appearance: MobileAppAppearance, resolvedColorScheme: ColorScheme) {
+        // Store concrete resolved colors, not only user-overridden optionals.
+        // This makes the clipboard payload portable between Mac/iPhone and
+        // preserves the exact visible theme even when some values were defaults.
         accentColorValue = appearance.accentColorValue
-        mainBackgroundColorValue = appearance.mainBackgroundColorValue
-        topBarBackgroundColorValue = appearance.topBarBackgroundColorValue
-        sidebarBackgroundColorValue = appearance.sidebarBackgroundColorValue
-        composerAreaBackgroundColorValue = appearance.composerAreaBackgroundColorValue
-        textColorValue = appearance.textColorValue
-        userMessageBackgroundColorValue = appearance.userMessageBackgroundColorValue
-        userMessageTextColorValue = appearance.userMessageTextColorValue
-        assistantMessageBackgroundColorValue = appearance.assistantMessageBackgroundColorValue
-        assistantMessageTextColorValue = appearance.assistantMessageTextColorValue
+        mainBackgroundColorValue = MobileCodableAccentColor(appearance.mainBackgroundColor(for: resolvedColorScheme))
+        topBarBackgroundColorValue = MobileCodableAccentColor(appearance.topBarBackgroundColor(for: resolvedColorScheme))
+        sidebarBackgroundColorValue = MobileCodableAccentColor(appearance.sidebarBackgroundColor(for: resolvedColorScheme))
+        composerAreaBackgroundColorValue = MobileCodableAccentColor(appearance.composerAreaBackgroundColor(for: resolvedColorScheme))
+        textColorValue = MobileCodableAccentColor(appearance.textColor(for: resolvedColorScheme))
+        userMessageBackgroundColorValue = MobileCodableAccentColor(appearance.userMessageBackgroundColor)
+        userMessageTextColorValue = MobileCodableAccentColor(appearance.userMessageTextColor)
+        assistantMessageBackgroundColorValue = MobileCodableAccentColor(appearance.assistantMessageBackgroundColor(for: resolvedColorScheme))
+        assistantMessageTextColorValue = MobileCodableAccentColor(appearance.assistantMessageTextColor(for: resolvedColorScheme))
         colorScheme = appearance.colorScheme
     }
 
     func apply(to appearance: inout MobileAppAppearance) {
-        appearance.accentColorValue = accentColorValue
-        appearance.mainBackgroundColorValue = mainBackgroundColorValue
-        appearance.topBarBackgroundColorValue = topBarBackgroundColorValue
-        appearance.sidebarBackgroundColorValue = sidebarBackgroundColorValue
-        appearance.composerAreaBackgroundColorValue = composerAreaBackgroundColorValue
-        appearance.textColorValue = textColorValue
-        appearance.userMessageBackgroundColorValue = userMessageBackgroundColorValue
-        appearance.userMessageTextColorValue = userMessageTextColorValue
-        appearance.assistantMessageBackgroundColorValue = assistantMessageBackgroundColorValue
-        appearance.assistantMessageTextColorValue = assistantMessageTextColorValue
-        appearance.colorScheme = colorScheme
+        // Be tolerant of older/partial clipboard payloads: missing fields leave
+        // current settings untouched instead of resetting them to defaults.
+        if let accentColorValue { appearance.accentColorValue = accentColorValue }
+        if let mainBackgroundColorValue { appearance.mainBackgroundColorValue = mainBackgroundColorValue }
+        if let topBarBackgroundColorValue { appearance.topBarBackgroundColorValue = topBarBackgroundColorValue }
+        if let sidebarBackgroundColorValue { appearance.sidebarBackgroundColorValue = sidebarBackgroundColorValue }
+        if let composerAreaBackgroundColorValue { appearance.composerAreaBackgroundColorValue = composerAreaBackgroundColorValue }
+        if let textColorValue { appearance.textColorValue = textColorValue }
+        if let userMessageBackgroundColorValue { appearance.userMessageBackgroundColorValue = userMessageBackgroundColorValue }
+        if let userMessageTextColorValue { appearance.userMessageTextColorValue = userMessageTextColorValue }
+        if let assistantMessageBackgroundColorValue { appearance.assistantMessageBackgroundColorValue = assistantMessageBackgroundColorValue }
+        if let assistantMessageTextColorValue { appearance.assistantMessageTextColorValue = assistantMessageTextColorValue }
+        if let colorScheme { appearance.colorScheme = colorScheme }
     }
 }
 
