@@ -10,6 +10,8 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
     public let status: String
     public let output: String?
     public let isError: Bool
+    public let lineIndex: Int
+    public let events: [SessionEvent]
 
     public var displayModel: String {
         model?.nilIfBlank ?? "default model"
@@ -41,10 +43,11 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
             }
         }
 
-        return calls.flatMap { call, _ in
+        return calls.flatMap { call, lineIndex in
             let specs = SubagentToolArguments.decode(from: call.arguments).expandedSpecs
             let result = resultsByCallId[call.id]
             var sections = SubagentOutputSection.parse(result?.output ?? "")
+            let detailedEventsByIndex = subagentDetailEventsByIndex(from: result, callLineIndex: lineIndex)
 
             return specs.enumerated().map { index, spec in
                 let matchedSectionIndex = sections.firstIndex { section in
@@ -69,10 +72,84 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
                     cwd: spec.cwd,
                     status: status,
                     output: output,
-                    isError: result?.isError ?? false
+                    isError: result?.isError ?? false,
+                    lineIndex: lineIndex,
+                    events: detailedEventsByIndex[index] ?? fallbackEvents(task: spec.task, output: output, model: spec.displayModel, idPrefix: "subagent:\(call.id):\(index)")
                 )
             }
         }
+        .sorted { lhs, rhs in
+            if lhs.lineIndex != rhs.lineIndex { return lhs.lineIndex > rhs.lineIndex }
+            return lhs.id > rhs.id
+        }
+    }
+
+    private static func subagentDetailEventsByIndex(from result: ToolResult?, callLineIndex: Int) -> [Int: [SessionEvent]] {
+        guard let detailsJSON = result?.detailsJSON,
+              let data = detailsJSON.data(using: .utf8),
+              let details = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = details["results"] as? [[String: Any]] else {
+            return [:]
+        }
+
+        var output: [Int: [SessionEvent]] = [:]
+        for (index, subagentResult) in results.enumerated() {
+            guard let messages = subagentResult["messages"] as? [[String: Any]] else { continue }
+            let events = messages.enumerated().flatMap { messageIndex, payload in
+                Self.events(fromSubagentMessagePayload: payload, callLineIndex: callLineIndex, messageIndex: messageIndex, subagentIndex: index)
+            }
+            if !events.isEmpty {
+                output[index] = events
+            }
+        }
+        return output
+    }
+
+    private static func events(fromSubagentMessagePayload payload: [String: Any], callLineIndex: Int, messageIndex: Int, subagentIndex: Int) -> [SessionEvent] {
+        var wrapper: [String: Any] = [
+            "type": "message",
+            "id": "subagent-detail:\(callLineIndex):\(subagentIndex):\(messageIndex)",
+            "message": payload
+        ]
+        if let timestamp = payload["timestamp"] {
+            wrapper["timestamp"] = timestamp
+        }
+        guard JSONSerialization.isValidJSONObject(wrapper),
+              let data = try? JSONSerialization.data(withJSONObject: wrapper, options: [.fragmentsAllowed, .withoutEscapingSlashes]),
+              let raw = String(data: data, encoding: .utf8) else {
+            return []
+        }
+        return SessionEventParser.decodeAll(line: raw, at: callLineIndex * 1_000 + messageIndex)
+    }
+
+    private static func fallbackEvents(task: String?, output: String?, model: String?, idPrefix: String) -> [SessionEvent] {
+        var events: [SessionEvent] = [
+            .message(
+                Message(
+                    id: "\(idPrefix):task",
+                    role: .user,
+                    content: [.text(task?.nilIfBlank ?? "Subagent task")],
+                    model: nil,
+                    timestamp: nil,
+                    parentId: nil
+                ),
+                lineIndex: 0
+            )
+        ]
+        events.append(
+            .message(
+                Message(
+                    id: "\(idPrefix):output",
+                    role: .assistant,
+                    content: [.text(output?.nilIfBlank ?? "Waiting for subagent output…")],
+                    model: model,
+                    timestamp: nil,
+                    parentId: nil
+                ),
+                lineIndex: 1
+            )
+        )
+        return events
     }
 
     private static func fallbackOutput(for result: ToolResult?, index: Int, total: Int) -> String? {

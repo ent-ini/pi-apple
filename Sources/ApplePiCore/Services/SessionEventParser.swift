@@ -308,11 +308,12 @@ package enum SessionEventParser {
         let id = (object["id"] as? String) ?? stableToolResultID(for: callId)
         let toolName = (object["toolName"] as? String)
         let isError = (object["isError"] as? Bool) ?? false
+        let details = object["details"]
         let output = outputWithDetails(
             text: stringifyToolResultContent(object["content"]),
-            details: object["details"]
+            details: details
         )
-        return .result(id: id, callId: callId, toolName: toolName, output: output, isError: isError)
+        return .result(id: id, callId: callId, toolName: toolName, output: output, isError: isError, detailsJSON: detailsJSONString(details))
     }
 
     /// Parse a `role: "toolResult"` line that lives inside a `type: "message"`
@@ -325,15 +326,29 @@ package enum SessionEventParser {
         let id = parentID ?? (payload["id"] as? String) ?? stableToolResultID(for: callId)
         let toolName = (payload["toolName"] as? String)
         let isError = (payload["isError"] as? Bool) ?? false
+        let details = payload["details"]
         let output = outputWithDetails(
             text: stringifyToolResultContent(payload["content"]),
-            details: payload["details"]
+            details: details
         )
-        return .result(id: id, callId: callId, toolName: toolName, output: output, isError: isError)
+        return .result(id: id, callId: callId, toolName: toolName, output: output, isError: isError, detailsJSON: detailsJSONString(details))
     }
 
     private static func stableToolResultID(for callId: String) -> String {
         callId.isEmpty ? UUID().uuidString : "toolResult:\(callId)"
+    }
+
+    private static func detailsJSONString(_ details: Any?) -> String? {
+        guard let details,
+              JSONSerialization.isValidJSONObject(details),
+              let data = try? JSONSerialization.data(
+                withJSONObject: details,
+                options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]
+              ),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return text
     }
 
     private static func outputWithDetails(text: String, details: Any?) -> String {

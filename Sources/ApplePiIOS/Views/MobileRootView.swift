@@ -195,6 +195,9 @@ private struct MobileSessionDetailView: View {
     @FocusState private var isComposerFocused: Bool
     @State private var showsModelPicker = false
     @State private var showsThinkingPicker = false
+    @State private var showsDefaultModelPicker = false
+    @State private var showsDefaultThinkingPicker = false
+    @State private var showsSubagents = false
     @State private var showsRenameAlert = false
     @State private var renameDraftTitle = ""
 
@@ -239,6 +242,24 @@ private struct MobileSessionDetailView: View {
             }
             .environmentObject(appState)
         }
+        .sheet(isPresented: $showsDefaultModelPicker) {
+            NavigationStack {
+                MobileDefaultModelPickerSheet()
+            }
+            .environmentObject(appState)
+        }
+        .sheet(isPresented: $showsDefaultThinkingPicker) {
+            NavigationStack {
+                MobileDefaultThinkingPickerSheet()
+            }
+            .environmentObject(appState)
+        }
+        .sheet(isPresented: $showsSubagents) {
+            NavigationStack {
+                MobileSubagentsView()
+            }
+            .environmentObject(appState)
+        }
         .alert("Rename Session", isPresented: $showsRenameAlert) {
             TextField("Name", text: $renameDraftTitle)
             Button("Rename") {
@@ -273,13 +294,25 @@ private struct MobileSessionDetailView: View {
             MobileIconButton(systemName: "square.and.pencil", help: "New session") {
                 appState.startNewSession()
             }
+
+            MobileIconButton(systemName: "person.2.wave.2", help: "Subagents", isDisabled: appState.selectedSession == nil) {
+                showsSubagents = true
+            }
         }
     }
 
     private var sessionTitleMenu: some View {
         Menu {
             if appState.selectedSession == nil {
-                Text("No active session yet")
+                Button("Model: \(appState.defaultModelDisplayName)") {
+                    showsDefaultModelPicker = true
+                    appState.refreshAvailableModelsCache()
+                }
+
+                Button("Thinking: \(appState.defaultThinkingDisplayName)") {
+                    showsDefaultThinkingPicker = true
+                }
+                .disabled(appState.defaultModelPreference == nil)
             } else {
                 Button("Rename") {
                     renameDraftTitle = appState.selectedSession?.title ?? ""
@@ -1175,6 +1208,190 @@ private struct MobileRuntimePill: View {
 
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private struct MobileSubagentsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+    @State private var selectedSubagentID: SubagentSession.ID?
+
+    private var subagents: [SubagentSession] {
+        SubagentSession.extract(from: appState.selectedEvents)
+    }
+
+    private var selectedSubagent: SubagentSession? {
+        guard let selectedSubagentID else { return nil }
+        return subagents.first { $0.id == selectedSubagentID }
+    }
+
+    var body: some View {
+        Group {
+            if let selectedSubagent {
+                MobileSubagentDetailView(subagent: selectedSubagent) {
+                    self.selectedSubagentID = nil
+                }
+            } else if subagents.isEmpty {
+                ContentUnavailableView(
+                    "No subagents yet",
+                    systemImage: "person.2.slash",
+                    description: Text("Subagent runs for this session will appear here.")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(subagents) { subagent in
+                            Button {
+                                selectedSubagentID = subagent.id
+                            } label: {
+                                MobileSubagentRow(subagent: subagent)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding()
+                }
+            }
+        }
+        .navigationTitle("Subagents")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .onChange(of: subagents.map(\.id)) { _, ids in
+            guard let selectedSubagentID, !ids.contains(selectedSubagentID) else { return }
+            self.selectedSubagentID = nil
+        }
+    }
+}
+
+private struct MobileSubagentRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
+    let subagent: SubagentSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: subagent.isError ? "exclamationmark.triangle.fill" : "person.crop.circle.badge.checkmark")
+                    .foregroundStyle(subagent.isError ? .red : appState.appearance.accentColor)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(subagent.name)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Text(subagent.displayModel)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Text(subagent.displayStatus)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(subagent.isError ? .red : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: subagent.isError ? 0.10 : 0.06))
+                    .clipShape(Capsule())
+            }
+
+            Text(subagent.taskPreview)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let cwd = subagent.cwd?.nilIfBlank {
+                Label(cwd, systemImage: "folder")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private struct MobileSubagentDetailView: View {
+    let subagent: SubagentSession
+    let onBack: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.plain)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(subagent.name)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Text(subagent.displayModel)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            Divider().opacity(0.18)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if let cwd = subagent.cwd?.nilIfBlank {
+                            Label(cwd, systemImage: "folder")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+
+                        ForEach(rows) { row in
+                            MobileEventRow(row: row)
+                                .id(row.id)
+                        }
+                    }
+                    .padding()
+                }
+                .onAppear { scrollToBottom(proxy: proxy, animated: false) }
+                .onChange(of: scrollSignature) { _, _ in
+                    scrollToBottom(proxy: proxy, animated: true)
+                }
+            }
+        }
+    }
+
+    private var rows: [MobileDisplayedRow] {
+        MobileDisplayedRow.groupingToolResults(in: subagent.events.filter(\.isVisibleInTranscript))
+    }
+
+    private var scrollSignature: String {
+        rows.map(\.scrollFingerprint).joined(separator: "|")
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
+        guard let id = rows.last?.id else { return }
+        let action = { proxy.scrollTo(id, anchor: .bottom) }
+        if animated {
+            withAnimation(.snappy) { action() }
+        } else {
+            action()
+        }
     }
 }
 

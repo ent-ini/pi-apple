@@ -788,7 +788,8 @@ final class MobilePiAppState: ObservableObject {
                     callId: result.callId,
                     toolName: result.toolName,
                     output: truncatedForMobileMemory(result.output, label: "tool result"),
-                    isError: result.isError
+                    isError: result.isError,
+                    detailsJSON: result.detailsJSON
                 ),
                 lineIndex: lineIndex
             )

@@ -66,6 +66,55 @@ struct SessionEventParserToolResultTests {
     }
 
     @Test
+    func toolResultRoleMessageRetainsRawDetailsForSubagentTranscriptParsing() {
+        let raw = #"""
+        {"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"call-subagent","toolName":"subagent","content":"done","isError":false,"details":{"results":[{"messages":[{"role":"user","content":"nested task","timestamp":1717230000000},{"role":"assistant","content":[{"type":"thinking","thinking":"thought"},{"type":"toolCall","id":"nested-call","name":"read","arguments":{"path":"a.txt"}},{"type":"text","text":"final text"}],"timestamp":1717230001000},{"role":"toolResult","toolCallId":"nested-call","toolName":"read","content":"contents","isError":false,"timestamp":1717230002000}]}]}}}
+        """#
+
+        let events = SessionEventParser.parse(lines: [raw])
+
+        guard case .toolResult(let result, _) = events.first else {
+            Issue.record("Expected .toolResult")
+            return
+        }
+        #expect(result.output.contains("done"))
+        #expect(result.detailsJSON?.contains("nested-call") == true)
+        #expect(result.detailsJSON?.contains("final text") == true)
+    }
+
+    @Test
+    func subagentExtractionBuildsNewestFirstNestedReadableTranscript() {
+        let lines = [
+            #"{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-old","name":"subagent","arguments":{"task":"old task","temporaryAgent":{"name":"Old","model":"openai/old"}}}]}}"#,
+            #"{"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"call-old","toolName":"subagent","content":"old done","isError":false,"details":{"results":[{"messages":[{"role":"user","content":"old task"},{"role":"assistant","content":"old answer"}]}]}}}"#,
+            #"{"type":"message","id":"a2","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-new","name":"subagent","arguments":{"task":"new task","temporaryAgent":{"name":"New","model":"openai/new"}}}]}}"#,
+            #"{"type":"message","id":"r2","message":{"role":"toolResult","toolCallId":"call-new","toolName":"subagent","content":"new done","isError":false,"details":{"results":[{"messages":[{"role":"user","content":"new task","timestamp":1717230000000},{"role":"assistant","content":[{"type":"thinking","thinking":"thought"},{"type":"toolCall","id":"nested-call","name":"read","arguments":{"path":"a.txt"}},{"type":"text","text":"final text"}],"timestamp":1717230001000},{"role":"toolResult","toolCallId":"nested-call","toolName":"read","content":"contents","isError":false,"timestamp":1717230002000}]}]}}}"#
+        ]
+
+        let subagents = SubagentSession.extract(from: SessionEventParser.parse(lines: lines))
+
+        #expect(subagents.map(\.name) == ["New", "Old"])
+        let newestEvents = subagents.first?.events ?? []
+        #expect(newestEvents.contains {
+            if case .toolCall(let call, _) = $0 { return call.id == "nested-call" }
+            return false
+        })
+        #expect(newestEvents.contains {
+            if case .toolResult(let result, _) = $0 { return result.output == "contents" }
+            return false
+        })
+        #expect(newestEvents.contains {
+            if case .message(let message, _) = $0 {
+                return message.content.contains { block in
+                    if case .thinking(let text, _) = block { return text == "thought" }
+                    return false
+                }
+            }
+            return false
+        })
+    }
+
+    @Test
     func toolResultRoleMessageRendersStructuredTextContentAsPlainOutput() {
         // Some tools return `content` as an array of typed text blocks.
         // The UI should show the tool's actual text output, not raw JSON.

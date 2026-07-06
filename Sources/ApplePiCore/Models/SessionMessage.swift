@@ -76,35 +76,41 @@ public enum ToolCall: Identifiable, Hashable, Sendable {
 
 /// The outcome of a tool invocation, paired with the originating call id.
 public enum ToolResult: Identifiable, Hashable, Sendable {
-    case result(id: String, callId: String, toolName: String?, output: String, isError: Bool)
+    case result(id: String, callId: String, toolName: String?, output: String, isError: Bool, detailsJSON: String? = nil)
 
     public var id: String {
         switch self {
-        case .result(let id, _, _, _, _): return id
+        case .result(let id, _, _, _, _, _): return id
         }
     }
 
     public var callId: String {
         switch self {
-        case .result(_, let callId, _, _, _): return callId
+        case .result(_, let callId, _, _, _, _): return callId
         }
     }
 
     public var toolName: String? {
         switch self {
-        case .result(_, _, let toolName, _, _): return toolName
+        case .result(_, _, let toolName, _, _, _): return toolName
         }
     }
 
     public var output: String {
         switch self {
-        case .result(_, _, _, let output, _): return output
+        case .result(_, _, _, let output, _, _): return output
         }
     }
 
     public var isError: Bool {
         switch self {
-        case .result(_, _, _, _, let isError): return isError
+        case .result(_, _, _, _, let isError, _): return isError
+        }
+    }
+
+    public var detailsJSON: String? {
+        switch self {
+        case .result(_, _, _, _, _, let detailsJSON): return detailsJSON
         }
     }
 }

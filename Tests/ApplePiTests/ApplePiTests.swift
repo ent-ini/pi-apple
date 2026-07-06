@@ -899,12 +899,8 @@ private func isolatedDefaults() -> UserDefaults {
     }
     if case .toolResult(let result, _) = events[1] {
         #expect(result.callId == "call-1")
-        if case .result(_, _, _, let output, let isError) = result {
-            #expect(output == "file contents")
-            #expect(isError == false)
-        } else {
-            Issue.record("Expected plain tool result")
-        }
+        #expect(result.output == "file contents")
+        #expect(result.isError == false)
     } else {
         Issue.record("Expected tool result at index 1")
     }

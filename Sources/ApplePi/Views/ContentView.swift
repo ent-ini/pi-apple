@@ -824,8 +824,10 @@ private struct UtilitySubagentsPanel: View {
 
     private var mergedSessionEvents: [SessionEvent] {
         guard !fullSessionEvents.isEmpty else { return session.events }
-        var seenIDs = Set(fullSessionEvents.map(\.id))
-        return fullSessionEvents + session.events.filter { seenIDs.insert($0.id).inserted }
+        // Prefer the live ChatSession rows so active subagent tool results,
+        // thinking and deltas replace the older full-page snapshot.
+        var seenIDs = Set(session.events.map(\.id))
+        return session.events + fullSessionEvents.filter { seenIDs.insert($0.id).inserted }
     }
 
     private var selectedSubagent: SubagentSession? {
@@ -1017,8 +1019,9 @@ private struct SubagentDetailView: View {
                             .lineLimit(2)
                     }
 
-                    MessageBubble(message: userMessage)
-                    MessageBubble(message: assistantMessage)
+                    ForEach(displayedRows) { row in
+                        subagentRow(row)
+                    }
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1027,26 +1030,84 @@ private struct SubagentDetailView: View {
         }
     }
 
-    private var userMessage: Message {
-        Message(
-            id: "\(subagent.id):task",
-            role: .user,
-            content: [.text(subagent.task.nilIfBlank ?? "Subagent task")],
-            model: nil,
-            timestamp: nil,
-            parentId: nil
-        )
+    @ViewBuilder
+    private func subagentRow(_ row: SubagentDisplayedRow) -> some View {
+        switch row {
+        case .event(let event):
+            switch event {
+            case .message(let message, _):
+                MessageBubble(message: message)
+            case .toolCall(let call, _):
+                ToolInteractionRow(
+                    name: call.name,
+                    arguments: call.arguments,
+                    result: nil,
+                    visibilityID: "visibility:\(event.id)"
+                )
+            case .toolResult(let result, _):
+                ToolEventRow(
+                    kind: .toolResult(name: result.toolName, callId: result.callId, output: result.output, isError: result.isError),
+                    visibilityID: "visibility:\(event.id)"
+                )
+            case .meta(let meta, _):
+                ToolEventRow(
+                    kind: .meta(displayName: meta.displayName, workingDirectory: meta.workingDirectory, parentSession: meta.parentSession),
+                    visibilityID: "visibility:\(event.id)"
+                )
+            case .other(let type, _):
+                ToolEventRow(kind: .other(type: type), visibilityID: "visibility:\(event.id)")
+            }
+        case .toolInteraction(let call, let result, _):
+            ToolInteractionRow(
+                name: call.name,
+                arguments: call.arguments,
+                result: result,
+                visibilityID: "visibility:\(row.id)"
+            )
+        }
     }
 
-    private var assistantMessage: Message {
-        Message(
-            id: "\(subagent.id):output",
-            role: .assistant,
-            content: [.text(subagent.output?.nilIfBlank ?? "Waiting for subagent output…")],
-            model: subagent.model,
-            timestamp: nil,
-            parentId: nil
-        )
+    private var displayedRows: [SubagentDisplayedRow] {
+        SubagentDisplayedRow.groupingToolResults(in: subagent.events.filter(\.isVisibleInTranscript))
+    }
+}
+
+private enum SubagentDisplayedRow: Identifiable, Hashable {
+    case event(SessionEvent)
+    case toolInteraction(call: ToolCall, result: ToolResult?, lineIndex: Int)
+
+    var id: String {
+        switch self {
+        case .event(let event): return event.id
+        case .toolInteraction(let call, _, _): return "subagentToolInteraction:\(call.id)"
+        }
+    }
+
+    static func groupingToolResults(in events: [SessionEvent]) -> [SubagentDisplayedRow] {
+        var resultByCallID: [String: ToolResult] = [:]
+        var callIDs = Set<String>()
+        for event in events {
+            switch event {
+            case .toolCall(let call, _):
+                callIDs.insert(call.id)
+            case .toolResult(let result, _):
+                guard !result.callId.isEmpty else { continue }
+                resultByCallID[result.callId] = result
+            case .message, .meta, .other:
+                continue
+            }
+        }
+        let pairedCallIDs = Set(callIDs.filter { resultByCallID[$0] != nil })
+        return events.compactMap { event in
+            switch event {
+            case .toolCall(let call, let lineIndex):
+                return .toolInteraction(call: call, result: resultByCallID[call.id], lineIndex: lineIndex)
+            case .toolResult(let result, _):
+                return pairedCallIDs.contains(result.callId) ? nil : .event(event)
+            case .message, .meta, .other:
+                return .event(event)
+            }
+        }
     }
 }
 
