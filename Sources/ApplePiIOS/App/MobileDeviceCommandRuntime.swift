@@ -272,17 +272,15 @@ private final class MobileJavaScriptExecutor {
     }
 
     func run(script: String, timeoutSeconds: Int) -> MobileDeviceScriptExecutionResult {
-        let bridge = MobilePiJSBridge(deviceInfo: deviceInfo)
         guard let context = JSContext() else {
             return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "Could not create JavaScript context", logs: [])
         }
+        var logs = ["timeoutSeconds=\(timeoutSeconds)"]
         var exceptionMessage: String?
         context.exceptionHandler = { _, exception in
             exceptionMessage = exception?.toString()
         }
-        context.setObject(bridge, forKeyedSubscript: "__piBridge" as NSString)
-        context.evaluateScript(Self.bootstrapScript)
-        bridge.log("timeoutSeconds=\(timeoutSeconds)")
+        context.evaluateScript(Self.bootstrapScript(deviceInfo: deviceInfo, appInfo: Self.currentAppInfo()))
 
         let wrapped = """
         (function() {
@@ -292,33 +290,60 @@ private final class MobileJavaScriptExecutor {
         let started = Date()
         let value = context.evaluateScript(wrapped)
         let durationMs = Int(Date().timeIntervalSince(started) * 1000)
-        bridge.log("durationMs=\(durationMs)")
+        logs.append("durationMs=\(durationMs)")
+        if let jsLogs = context.objectForKeyedSubscript("__piLogs")?.toArray() as? [Any] {
+            logs.append(contentsOf: jsLogs.map { String(describing: $0).prefixString(4_000) })
+        }
 
         if let exceptionMessage {
-            return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: exceptionMessage, logs: bridge.logs)
+            return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: exceptionMessage, logs: logs)
         }
         let resultJSON = Self.jsonString(from: value)
-        return MobileDeviceScriptExecutionResult(ok: true, resultJSON: resultJSON, error: nil, logs: bridge.logs)
+        return MobileDeviceScriptExecutionResult(ok: true, resultJSON: resultJSON, error: nil, logs: logs)
     }
 
-    private static let bootstrapScript = """
-    var pi = {
-      log: function(message) { __piBridge.log(String(message)); },
-      device: {
-        info: function() { return __piBridge.deviceInfo(); }
-      },
-      app: {
-        info: function() { return __piBridge.appInfo(); }
-      },
-      net: {
-        httpText: function(url) { return __piBridge.httpText(String(url)); }
-      },
-      clipboard: {
-        text: function() { return __piBridge.clipboardText(); },
-        setText: function(text) { return __piBridge.setClipboardText(String(text)); }
-      }
-    };
-    """
+    private static func bootstrapScript(deviceInfo: [String: String], appInfo: [String: String]) -> String {
+        let deviceJSON = jsonLiteral(deviceInfo)
+        let appJSON = jsonLiteral(appInfo)
+        return """
+        var __piLogs = [];
+        var pi = {
+          log: function(message) { __piLogs.push(String(message)); },
+          device: {
+            info: function() { return \(deviceJSON); }
+          },
+          app: {
+            info: function() { return \(appJSON); }
+          },
+          net: {
+            httpText: function(url) { throw new Error("pi.net.httpText is not available in this MVP build yet"); }
+          },
+          clipboard: {
+            text: function() { return null; },
+            setText: function(text) { throw new Error("pi.clipboard.setText is not available in this MVP build yet"); }
+          }
+        };
+        """
+    }
+
+    private static func currentAppInfo() -> [String: String] {
+        let bundle = Bundle.main
+        return [
+            "bundleIdentifier": bundle.bundleIdentifier ?? "",
+            "version": String(describing: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? ""),
+            "build": String(describing: bundle.object(forInfoDictionaryKey: "CFBundleVersion") ?? ""),
+            "documentsDirectory": FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "",
+            "temporaryDirectory": FileManager.default.temporaryDirectory.path
+        ]
+    }
+
+    private static func jsonLiteral(_ object: [String: String]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let string = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return string
+    }
 
     private static func jsonString(from value: JSValue?) -> String {
         guard let value, !value.isUndefined else { return "null" }
@@ -361,6 +386,12 @@ private final class MobileJavaScriptExecutor {
         default:
             return String(describing: object)
         }
+    }
+}
+
+private extension StringProtocol {
+    func prefixString(_ maxLength: Int) -> String {
+        String(prefix(maxLength))
     }
 }
 
