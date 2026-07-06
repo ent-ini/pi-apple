@@ -795,7 +795,6 @@ private struct MobileSessionDetailView: View {
         .padding(.top, 6)
         .padding(.bottom, keyboardObserver.visibleHeight > 0 ? 0 : 8)
         .frame(maxWidth: .infinity)
-        .background(appState.appearance.composerAreaBackgroundColor(for: resolvedColorScheme).ignoresSafeArea(edges: .bottom))
     }
 
     private var canSendDraft: Bool {
