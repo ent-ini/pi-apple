@@ -632,13 +632,20 @@ private struct MobileSessionDetailView: View {
 
     private var transcriptUserScrollGesture: some Gesture {
         DragGesture(minimumDistance: 6, coordinateSpace: .local)
-            .onChanged { _ in
-                noteTranscriptUserScrollIntent()
+            .onChanged { value in
+                noteTranscriptUserScrollIntent(value)
             }
     }
 
-    private func noteTranscriptUserScrollIntent() {
+    private func noteTranscriptUserScrollIntent(_ value: DragGesture.Value) {
         recentTranscriptUserScrollUntil = Date().addingTimeInterval(Self.recentUserScrollDuration)
+        guard abs(value.translation.height) > 4,
+              abs(value.translation.height) > abs(value.translation.width) else { return }
+        // A deliberate user drag must win over live-tail auto-scroll immediately;
+        // otherwise streaming responses keep snapping the transcript back down.
+        stickyAutoScrollUntil = nil
+        isTranscriptPinnedToBottom = false
+        cancelBottomScrollWorkItems()
     }
 
     private func startStickyAutoScroll() {
@@ -686,6 +693,7 @@ private struct MobileSessionDetailView: View {
     private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
         guard isTranscriptPinnedToBottom || isStickyAutoScrollActive else { return }
         startStickyAutoScroll()
+        guard bottomScrollWorkItems.isEmpty else { return }
         scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
     }
 
@@ -785,7 +793,9 @@ private struct MobileSessionDetailView: View {
         )
         .padding(.horizontal, 14)
         .padding(.top, 6)
-        .padding(.bottom, 8)
+        .padding(.bottom, keyboardObserver.visibleHeight > 0 ? 0 : 8)
+        .frame(maxWidth: .infinity)
+        .background(appState.appearance.composerAreaBackgroundColor(for: resolvedColorScheme).ignoresSafeArea(edges: .bottom))
     }
 
     private var canSendDraft: Bool {
