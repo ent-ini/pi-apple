@@ -19,6 +19,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     private let onStatus: @MainActor @Sendable (String) -> Void
     private let deviceID: String
     private let deviceName: String
+    private let deviceInfoSnapshot: [String: String]
     private var streamTask: Task<Void, Never>?
 
     static let capabilities = [
@@ -44,6 +45,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
             deviceID = fresh
         }
         deviceName = Self.platformDeviceName
+        deviceInfoSnapshot = Self.platformDeviceInfoSnapshot()
     }
 
     deinit {
@@ -103,11 +105,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
 
     @MainActor
     private static var platformDeviceName: String {
-        #if canImport(UIKit)
-        return UIDevice.current.name
-        #else
-        return ProcessInfo.processInfo.hostName
-        #endif
+        platformDeviceInfoSnapshot()["name"] ?? "iPhone"
     }
 
     @MainActor
@@ -119,9 +117,34 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
         #endif
     }
 
+    @MainActor
+    private static func platformDeviceInfoSnapshot() -> [String: String] {
+        #if canImport(UIKit)
+        let device = UIDevice.current
+        return [
+            "name": device.name,
+            "systemName": device.systemName,
+            "systemVersion": device.systemVersion,
+            "model": device.model,
+            "localizedModel": device.localizedModel,
+            "batteryLevel": String(device.batteryLevel),
+            "batteryState": String(device.batteryState.rawValue),
+            "identifierForVendor": device.identifierForVendor?.uuidString ?? ""
+        ]
+        #else
+        return [
+            "name": ProcessInfo.processInfo.hostName,
+            "systemName": "macOS",
+            "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
+            "model": "ApplePiIOS SwiftPM host"
+        ]
+        #endif
+    }
+
     private func execute(job: RemoteDeviceJobRecord) async -> MobileDeviceScriptExecutionResult {
-        await Task.detached(priority: .userInitiated) {
-            MobileJavaScriptExecutor().run(script: job.script, timeoutSeconds: job.timeoutSeconds ?? 30)
+        let deviceInfoSnapshot = deviceInfoSnapshot
+        return await Task.detached(priority: .userInitiated) {
+            MobileJavaScriptExecutor(deviceInfo: deviceInfoSnapshot).run(script: job.script, timeoutSeconds: job.timeoutSeconds ?? 30)
         }.value
     }
 }
@@ -137,48 +160,20 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
 
 private final class MobilePiJSBridge: NSObject, MobilePiJSBridgeExports {
     private(set) var logs: [String] = []
+    private let deviceInfoSnapshot: [String: String]
+
+    init(deviceInfo: [String: String]) {
+        deviceInfoSnapshot = deviceInfo
+        super.init()
+    }
 
     func log(_ message: String) {
         logs.append(String(message.prefix(4_000)))
     }
 
     func deviceInfo() -> NSDictionary {
-        #if canImport(UIKit)
-        let info: [String: String]
-        if Thread.isMainThread {
-            info = MainActor.assumeIsolated { Self.currentDeviceInfo() }
-        } else {
-            info = DispatchQueue.main.sync {
-                MainActor.assumeIsolated { Self.currentDeviceInfo() }
-            }
-        }
-        return info as NSDictionary
-        #else
-        return [
-            "name": ProcessInfo.processInfo.hostName,
-            "systemName": "macOS",
-            "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
-            "model": "ApplePiIOS SwiftPM host"
-        ] as NSDictionary
-        #endif
+        deviceInfoSnapshot as NSDictionary
     }
-
-    #if canImport(UIKit)
-    @MainActor
-    private static func currentDeviceInfo() -> [String: String] {
-        let device = UIDevice.current
-        return [
-            "name": device.name,
-            "systemName": device.systemName,
-            "systemVersion": device.systemVersion,
-            "model": device.model,
-            "localizedModel": device.localizedModel,
-            "batteryLevel": String(device.batteryLevel),
-            "batteryState": String(device.batteryState.rawValue),
-            "identifierForVendor": device.identifierForVendor?.uuidString ?? ""
-        ]
-    }
-    #endif
 
     func appInfo() -> NSDictionary {
         let bundle = Bundle.main
@@ -267,8 +262,14 @@ private final class MobileHTTPTextResponseBox: @unchecked Sendable {
 }
 
 private final class MobileJavaScriptExecutor {
+    private let deviceInfo: [String: String]
+
+    init(deviceInfo: [String: String]) {
+        self.deviceInfo = deviceInfo
+    }
+
     func run(script: String, timeoutSeconds: Int) -> MobileDeviceScriptExecutionResult {
-        let bridge = MobilePiJSBridge()
+        let bridge = MobilePiJSBridge(deviceInfo: deviceInfo)
         guard let context = JSContext() else {
             return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "Could not create JavaScript context", logs: [])
         }
