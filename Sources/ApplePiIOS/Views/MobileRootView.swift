@@ -227,6 +227,10 @@ private struct MobileSessionDetailView: View {
     @State private var transcriptBottomMaxY: CGFloat = 0
     @State private var isTranscriptPinnedToBottom = true
 
+    private static let slashCommands: [MobileSlashCommand] = [
+        MobileSlashCommand(name: "/abort", description: "Stop the active run"),
+        MobileSlashCommand(name: "/compact", description: "Compact this session")
+    ]
     private static let transcriptCoordinateSpace = "MobileTranscriptScroll"
     private static let transcriptBottomID = "MobileTranscriptBottom"
     private static let transcriptAutoscrollBuffer: CGFloat = 24
@@ -482,6 +486,10 @@ private struct MobileSessionDetailView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 7) {
+            if showsSlashCommandSuggestions {
+                slashCommandSuggestions
+            }
+
             if !draftAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -515,20 +523,7 @@ private struct MobileSessionDetailView: View {
                     systemName: "arrow.up",
                     isDisabled: !canSendDraft
                 ) {
-                    isComposerFocused = true
-                    let attachmentsToSend = draftAttachments
-                    Task {
-                        let sent = await appState.sendDraft(attachments: attachmentsToSend)
-                        await MainActor.run {
-                            if sent {
-                                if draftAttachments == attachmentsToSend {
-                                    draftAttachments = []
-                                }
-                                cleanupAttachments(attachmentsToSend)
-                            }
-                            isComposerFocused = true
-                        }
-                    }
+                    handleComposerSubmit()
                 }
             }
         }
@@ -549,6 +544,106 @@ private struct MobileSessionDetailView: View {
 
     private var canSendDraft: Bool {
         !appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty
+    }
+
+    private var slashCommandMatches: [MobileSlashCommand] {
+        let text = appState.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("/") else { return [] }
+        return Self.slashCommands.filter { command in
+            command.name.hasPrefix(text) || text == "/"
+        }
+    }
+
+    private var showsSlashCommandSuggestions: Bool {
+        !slashCommandMatches.isEmpty && draftAttachments.isEmpty && !audioRecorder.isRecording && !isTranscribingAudio
+    }
+
+    @ViewBuilder
+    private var slashCommandSuggestions: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(slashCommandMatches) { command in
+                Button {
+                    selectSlashCommand(command)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(command.name)
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                            .foregroundStyle(appState.appearance.accentColor)
+                        Text(command.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.10))
+                .shadow(color: .black.opacity(0.18), radius: 12, x: 0, y: 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        )
+    }
+
+    private func handleComposerSubmit() {
+        let prompt = appState.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch prompt {
+        case "/abort":
+            handleAbortCommand()
+        case "/compact":
+            handleCompactCommand(instructions: "")
+        default:
+            if prompt.hasPrefix("/compact ") {
+                handleCompactCommand(instructions: String(prompt.dropFirst("/compact ".count)))
+            } else {
+                sendDraftToPi()
+            }
+        }
+    }
+
+    private func sendDraftToPi() {
+        isComposerFocused = true
+        let attachmentsToSend = draftAttachments
+        Task {
+            let sent = await appState.sendDraft(attachments: attachmentsToSend)
+            await MainActor.run {
+                if sent {
+                    if draftAttachments == attachmentsToSend {
+                        draftAttachments = []
+                    }
+                    cleanupAttachments(attachmentsToSend)
+                }
+                isComposerFocused = true
+            }
+        }
+    }
+
+    private func handleAbortCommand() {
+        clearComposer()
+        Task { await appState.abortSelectedSession() }
+    }
+
+    private func handleCompactCommand(instructions: String) {
+        clearComposer()
+        Task { await appState.compactSelectedSession(instructions: instructions) }
+    }
+
+    private func clearComposer() {
+        appState.draft = ""
+        cleanupAttachments(draftAttachments)
+        draftAttachments = []
+    }
+
+    private func selectSlashCommand(_ command: MobileSlashCommand) {
+        appState.draft = command.name
+        isComposerFocused = true
     }
 
     private func handleMicrophoneTapped() {
@@ -2105,6 +2200,13 @@ private struct MobileIconButton: View {
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
     }
+}
+
+private struct MobileSlashCommand: Identifiable, Hashable {
+    let name: String
+    let description: String
+
+    var id: String { name }
 }
 
 private struct MobileComposerIconButton: View {

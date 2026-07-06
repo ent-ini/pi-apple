@@ -581,6 +581,45 @@ final class MobilePiAppState: ObservableObject {
         appearance = copy
     }
 
+    func abortSelectedSession() async {
+        guard let sessionID = selectedSession?.id.nilIfBlank else {
+            statusMessage = "No session selected."
+            return
+        }
+        do {
+            try await RemoteDaemonClient().abortSession(host: host, sessionID: sessionID, tokenOverride: daemonToken.nilIfBlank)
+            statusMessage = "Abort requested."
+            await catchUpSelectedSession(sessionID: sessionID, reason: "abort")
+            await reloadCatalog(quietly: true)
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func compactSelectedSession(instructions: String = "") async {
+        guard let sessionID = selectedSession?.id.nilIfBlank else {
+            statusMessage = "No session selected."
+            return
+        }
+        statusMessage = "Compacting session…"
+        do {
+            try await RemoteDaemonClient().compactSession(
+                host: host,
+                sessionID: sessionID,
+                instructions: instructions,
+                tokenOverride: daemonToken.nilIfBlank
+            )
+            statusMessage = "Session compacted."
+            if selectedSession?.id == sessionID {
+                await reloadSelectedSession()
+            }
+            await refreshSelectedRuntimeAndModels()
+            await reloadCatalog(quietly: true)
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
     @discardableResult
     func sendDraft(attachments: [ChatAttachment] = []) async -> Bool {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
