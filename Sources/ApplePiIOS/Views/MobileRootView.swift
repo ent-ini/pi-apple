@@ -1,6 +1,10 @@
 import SwiftUI
 import ApplePiCore
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 struct MobileRootView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: MobilePiAppState
@@ -188,8 +192,11 @@ private struct MobileSessionDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: MobilePiAppState
+    @FocusState private var isComposerFocused: Bool
     @State private var showsModelPicker = false
     @State private var showsThinkingPicker = false
+    @State private var showsRenameAlert = false
+    @State private var renameDraftTitle = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -201,8 +208,8 @@ private struct MobileSessionDetailView: View {
 
             Divider().opacity(0.24)
 
-            if let session = appState.selectedSession {
-                transcript(for: session)
+            if appState.selectedSession != nil || !appState.selectedEvents.isEmpty {
+                transcript(title: appState.selectedSession?.title ?? "New session")
             } else {
                 ContentUnavailableView(
                     "New session",
@@ -232,6 +239,13 @@ private struct MobileSessionDetailView: View {
             }
             .environmentObject(appState)
         }
+        .alert("Rename Session", isPresented: $showsRenameAlert) {
+            TextField("Name", text: $renameDraftTitle)
+            Button("Rename") {
+                appState.renameSelectedSession(to: renameDraftTitle)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var chatTopBar: some View {
@@ -240,17 +254,7 @@ private struct MobileSessionDetailView: View {
                 dismiss()
             }
 
-            sessionTitlePill
-
-            if appState.selectedSession != nil {
-                MobileRuntimePill(systemName: "cpu", title: appState.selectedModelDisplayName) {
-                    showsModelPicker = true
-                    appState.refreshAvailableModelsCache()
-                }
-                MobileRuntimePill(systemName: "brain", title: appState.selectedThinkingLevel) {
-                    showsThinkingPicker = true
-                }
-            }
+            sessionTitleMenu
 
             Spacer(minLength: 0)
 
@@ -270,19 +274,53 @@ private struct MobileSessionDetailView: View {
         }
     }
 
-    private var sessionTitlePill: some View {
-        Text(appState.selectedSession?.title ?? "New Session")
-            .font(.caption.weight(.semibold))
-            .lineLimit(1)
+    private var sessionTitleMenu: some View {
+        Menu {
+            if appState.selectedSession == nil {
+                Text("No active session yet")
+            } else {
+                Button("Rename") {
+                    renameDraftTitle = appState.selectedSession?.title ?? ""
+                    showsRenameAlert = true
+                }
+
+                Divider()
+
+                Button("Model: \(appState.selectedModelDisplayName)") {
+                    showsModelPicker = true
+                    appState.refreshAvailableModelsCache()
+                }
+
+                Button("Thinking: \(appState.selectedThinkingLevel)") {
+                    showsThinkingPicker = true
+                }
+
+                Divider()
+
+                Button("Refresh runtime") {
+                    Task { await appState.refreshSelectedRuntimeAndModels() }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(appState.selectedSession?.title ?? "New Session")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
             .mobileBlobStyle(colorScheme: resolvedColorScheme)
+        }
+        .buttonStyle(.plain)
     }
 
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 
-    private func transcript(for session: PiSessionSummary) -> some View {
+    private func transcript(title: String) -> some View {
         let rows = MobileDisplayedRow.groupingToolResults(in: appState.filteredVisibleEvents)
+        let scrollSignature = rows.map(\.scrollFingerprint).joined(separator: "|")
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
@@ -296,15 +334,27 @@ private struct MobileSessionDetailView: View {
             .scrollContentBackground(.hidden)
             .overlay {
                 if appState.isLoadingSession && appState.selectedEvents.isEmpty {
-                    ProgressView("Loading \(session.title)…")
+                    ProgressView("Loading \(title)…")
                 }
             }
-            .onChange(of: rows.last?.id) { _, id in
-                guard let id else { return }
-                withAnimation(.snappy) {
-                    proxy.scrollTo(id, anchor: .bottom)
-                }
+            .onAppear {
+                scrollToBottom(rows: rows, proxy: proxy, animated: false)
             }
+            .onChange(of: scrollSignature) { _, _ in
+                scrollToBottom(rows: rows, proxy: proxy, animated: true)
+            }
+        }
+    }
+
+    private func scrollToBottom(rows: [MobileDisplayedRow], proxy: ScrollViewProxy, animated: Bool) {
+        guard let id = rows.last?.id else { return }
+        let action = {
+            proxy.scrollTo(id, anchor: .bottom)
+        }
+        if animated {
+            withAnimation(.snappy) { action() }
+        } else {
+            action()
         }
     }
 
@@ -315,6 +365,7 @@ private struct MobileSessionDetailView: View {
             TextField("Message pi…", text: $appState.draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...5)
+                .focused($isComposerFocused)
                 .padding(.vertical, 8)
                 .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
 
@@ -326,7 +377,11 @@ private struct MobileSessionDetailView: View {
                 systemName: "arrow.up",
                 isDisabled: appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ) {
-                Task { await appState.sendDraft() }
+                isComposerFocused = true
+                Task {
+                    await appState.sendDraft()
+                    await MainActor.run { isComposerFocused = true }
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -364,6 +419,15 @@ private enum MobileDisplayedRow: Identifiable, Hashable {
         }
     }
 
+    var scrollFingerprint: String {
+        switch self {
+        case .event(let event):
+            return "\(event.id):\(event.contentLengthForScrolling)"
+        case .toolInteraction(let call, let result, _):
+            return "toolInteraction:\(call.id):\(call.arguments.count):\(result?.output.count ?? 0)"
+        }
+    }
+
     static func groupingToolResults(in events: [SessionEvent]) -> [MobileDisplayedRow] {
         var resultByCallID: [String: ToolResult] = [:]
         var callIDs = Set<String>()
@@ -391,6 +455,32 @@ private enum MobileDisplayedRow: Identifiable, Hashable {
             case .message, .meta, .other:
                 return .event(event)
             }
+        }
+    }
+}
+
+private extension SessionEvent {
+    var contentLengthForScrolling: Int {
+        switch self {
+        case .message(let message, _):
+            return message.content.reduce(0) { partial, block in
+                switch block {
+                case .text(let text):
+                    return partial + text.count
+                case .thinking(let text, let signature):
+                    return partial + text.count + (signature?.count ?? 0)
+                case .image(let path, let mime):
+                    return partial + path.count + (mime?.count ?? 0)
+                }
+            }
+        case .toolCall(let call, _):
+            return call.arguments.count
+        case .toolResult(let result, _):
+            return result.output.count
+        case .other(let type, _):
+            return type.count
+        case .meta(let meta, _):
+            return meta.id.count + (meta.displayName?.count ?? 0)
         }
     }
 }
@@ -685,6 +775,7 @@ private struct MobileSettingsView: View {
     @EnvironmentObject private var appState: MobilePiAppState
     @State private var showsDefaultModelPicker = false
     @State private var showsDefaultThinkingPicker = false
+    @State private var appearanceClipboardStatus: String?
 
     var body: some View {
         Form {
@@ -778,6 +869,22 @@ private struct MobileSettingsView: View {
                 set: { newValue in appState.updateAppearance { $0.setAssistantMessageTextColor(newValue) } }
             ), supportsOpacity: false)
 
+            HStack {
+                Button("Copy colors") {
+                    copyAppearanceToClipboard()
+                }
+                Button("Paste colors") {
+                    pasteAppearanceFromClipboard()
+                }
+                Spacer()
+            }
+
+            if let appearanceClipboardStatus {
+                Text(appearanceClipboardStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Button("Reset custom colors") {
                 appState.updateAppearance { $0.resetCustomColors() }
             }
@@ -863,6 +970,88 @@ private struct MobileSettingsView: View {
 
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+
+    private func copyAppearanceToClipboard() {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(MobileAppearanceColorTransfer(appState.appearance))
+            guard let text = String(data: data, encoding: .utf8) else {
+                appearanceClipboardStatus = "Could not encode colors."
+                return
+            }
+            #if canImport(UIKit)
+            UIPasteboard.general.string = text
+            appearanceClipboardStatus = "Colors copied."
+            #else
+            appearanceClipboardStatus = "Clipboard is unavailable on this platform."
+            #endif
+        } catch {
+            appearanceClipboardStatus = error.localizedDescription
+        }
+    }
+
+    private func pasteAppearanceFromClipboard() {
+        #if canImport(UIKit)
+        guard let text = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty,
+              let data = text.data(using: .utf8) else {
+            appearanceClipboardStatus = "Clipboard is empty."
+            return
+        }
+        do {
+            let decoded = try JSONDecoder().decode(MobileAppearanceColorTransfer.self, from: data)
+            appState.updateAppearance { decoded.apply(to: &$0) }
+            appearanceClipboardStatus = "Colors pasted."
+        } catch {
+            appearanceClipboardStatus = "Could not paste colors: \(error.localizedDescription)"
+        }
+        #else
+        appearanceClipboardStatus = "Clipboard is unavailable on this platform."
+        #endif
+    }
+}
+
+private struct MobileAppearanceColorTransfer: Codable {
+    var accentColorValue: MobileCodableAccentColor
+    var mainBackgroundColorValue: MobileCodableAccentColor?
+    var topBarBackgroundColorValue: MobileCodableAccentColor?
+    var sidebarBackgroundColorValue: MobileCodableAccentColor?
+    var composerAreaBackgroundColorValue: MobileCodableAccentColor?
+    var textColorValue: MobileCodableAccentColor?
+    var userMessageBackgroundColorValue: MobileCodableAccentColor?
+    var userMessageTextColorValue: MobileCodableAccentColor?
+    var assistantMessageBackgroundColorValue: MobileCodableAccentColor?
+    var assistantMessageTextColorValue: MobileCodableAccentColor?
+    var colorScheme: MobileAppColorSchemePreference
+
+    init(_ appearance: MobileAppAppearance) {
+        accentColorValue = appearance.accentColorValue
+        mainBackgroundColorValue = appearance.mainBackgroundColorValue
+        topBarBackgroundColorValue = appearance.topBarBackgroundColorValue
+        sidebarBackgroundColorValue = appearance.sidebarBackgroundColorValue
+        composerAreaBackgroundColorValue = appearance.composerAreaBackgroundColorValue
+        textColorValue = appearance.textColorValue
+        userMessageBackgroundColorValue = appearance.userMessageBackgroundColorValue
+        userMessageTextColorValue = appearance.userMessageTextColorValue
+        assistantMessageBackgroundColorValue = appearance.assistantMessageBackgroundColorValue
+        assistantMessageTextColorValue = appearance.assistantMessageTextColorValue
+        colorScheme = appearance.colorScheme
+    }
+
+    func apply(to appearance: inout MobileAppAppearance) {
+        appearance.accentColorValue = accentColorValue
+        appearance.mainBackgroundColorValue = mainBackgroundColorValue
+        appearance.topBarBackgroundColorValue = topBarBackgroundColorValue
+        appearance.sidebarBackgroundColorValue = sidebarBackgroundColorValue
+        appearance.composerAreaBackgroundColorValue = composerAreaBackgroundColorValue
+        appearance.textColorValue = textColorValue
+        appearance.userMessageBackgroundColorValue = userMessageBackgroundColorValue
+        appearance.userMessageTextColorValue = userMessageTextColorValue
+        appearance.assistantMessageBackgroundColorValue = assistantMessageBackgroundColorValue
+        appearance.assistantMessageTextColorValue = assistantMessageTextColorValue
+        appearance.colorScheme = colorScheme
     }
 }
 

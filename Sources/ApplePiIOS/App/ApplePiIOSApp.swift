@@ -338,6 +338,39 @@ final class MobilePiAppState: ObservableObject {
         }
     }
 
+    func renameSelectedSession(to proposedTitle: String) {
+        guard let session = selectedSession else { return }
+        let title = proposedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != session.title else { return }
+
+        let previous = session
+        upsertSession(renamedSummary(previous, title: title))
+        statusMessage = "Renamed \(previous.title)"
+
+        let host = host
+        let token = daemonToken.nilIfBlank
+        Task { [weak self] in
+            do {
+                let updated = try await RemoteDaemonClient().renameSession(
+                    host: host,
+                    sessionID: previous.id,
+                    name: title,
+                    tokenOverride: token
+                )
+                await MainActor.run {
+                    guard let self, self.host == host else { return }
+                    self.upsertSession(updated)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.host == host else { return }
+                    self.upsertSession(previous)
+                    self.statusMessage = "Could not rename \(previous.title): \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func refreshAvailableModelsCache(force: Bool = false) {
         guard isConfigured else {
             statusMessage = "Remote API URL is not configured."
@@ -402,7 +435,12 @@ final class MobilePiAppState: ObservableObject {
     func sendDraft() async {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
+        let startsNewSession = selectedSession == nil
         draft = ""
+        if startsNewSession {
+            resetSelectedTranscript()
+        }
+        appendOptimisticUserMessage(prompt)
         isSending = true
         defer { isSending = false }
 
@@ -413,7 +451,6 @@ final class MobilePiAppState: ObservableObject {
                     await self.handleTurnStreamEvent(event)
                 }
             } else {
-                resetSelectedTranscript()
                 var request = PiLaunchRequest(workingDirectory: host.defaultWorkingDirectory)
                 if let defaultModelPreference {
                     request.initialModelProvider = defaultModelPreference.provider
@@ -506,6 +543,25 @@ final class MobilePiAppState: ObservableObject {
         )
         selectedSession = summary
         upsertSession(summary)
+    }
+
+    private func renamedSummary(_ session: PiSessionSummary, title: String) -> PiSessionSummary {
+        PiSessionSummary(
+            id: session.id,
+            filePath: session.filePath,
+            projectID: session.projectID,
+            title: title,
+            workingDirectory: session.workingDirectory,
+            messageCount: session.messageCount,
+            modifiedAt: Date(),
+            displayName: title,
+            parentSession: session.parentSession,
+            branchCount: session.branchCount,
+            labelCount: session.labelCount,
+            branchSummaryCount: session.branchSummaryCount,
+            latestModel: session.latestModel,
+            isGenerating: session.isGenerating
+        )
     }
 
     private func applyCatalog(_ snapshot: PiCatalogSnapshot) {
@@ -634,8 +690,22 @@ final class MobilePiAppState: ObservableObject {
         guard !events.isEmpty else { return }
         for event in events {
             guard !selectedPersistedEventIDs.contains(event.id) else { continue }
+            removeTransientEvents(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: false)
         }
+        sortSelectedEventsForDisplay()
+    }
+
+    private func appendOptimisticUserMessage(_ prompt: String) {
+        let message = Message(
+            id: "optimistic-user-\(UUID().uuidString)",
+            role: .user,
+            content: [.text(prompt)],
+            model: nil,
+            timestamp: Date(),
+            parentId: nil
+        )
+        upsertSelectedEvent(.message(message, lineIndex: Int.max), allowPersistedToWin: false)
         sortSelectedEventsForDisplay()
     }
 

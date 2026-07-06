@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var apiTokenStatus: String?
     @State private var groqAPIKeyInput: String = ""
     @State private var groqAPIKeyStatus: String?
+    @State private var appearanceClipboardStatus: String?
     @State private var diagnosticsCopyStatus: String?
     @State private var isConfirmingClearAPIToken = false
     @State private var isConfirmingClearGroqAPIKey = false
@@ -288,6 +289,21 @@ struct SettingsView: View {
                 }
             ), supportsOpacity: false)
 
+            HStack {
+                Button("Copy colors") {
+                    copyAppearanceToClipboard()
+                }
+                Button("Paste colors") {
+                    pasteAppearanceFromClipboard()
+                }
+                if let appearanceClipboardStatus {
+                    Text(appearanceClipboardStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
             Button("Reset custom colors") {
                 appState.updateAppearance { $0.resetCustomColors() }
             }
@@ -303,6 +319,39 @@ struct SettingsView: View {
                     appState.updateAppearance { $0.emptyChatMessage = newValue }
                 }
             ))
+        }
+    }
+
+    private func copyAppearanceToClipboard() {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(AppAppearanceColorTransfer(appState.appearance))
+            guard let text = String(data: data, encoding: .utf8) else {
+                appearanceClipboardStatus = "Could not encode colors."
+                return
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            appearanceClipboardStatus = "Colors copied."
+        } catch {
+            appearanceClipboardStatus = error.localizedDescription
+        }
+    }
+
+    private func pasteAppearanceFromClipboard() {
+        guard let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty,
+              let data = text.data(using: .utf8) else {
+            appearanceClipboardStatus = "Clipboard is empty."
+            return
+        }
+        do {
+            let decoded = try JSONDecoder().decode(AppAppearanceColorTransfer.self, from: data)
+            appState.updateAppearance { decoded.apply(to: &$0) }
+            appearanceClipboardStatus = "Colors pasted."
+        } catch {
+            appearanceClipboardStatus = "Could not paste colors: \(error.localizedDescription)"
         }
     }
 
@@ -777,6 +826,48 @@ struct SettingsView: View {
         } else {
             groqAPIKeyStatus = "Cleared."
         }
+    }
+}
+
+private struct AppAppearanceColorTransfer: Codable {
+    var accentColorValue: CodableAccentColor
+    var mainBackgroundColorValue: CodableAccentColor?
+    var topBarBackgroundColorValue: CodableAccentColor?
+    var sidebarBackgroundColorValue: CodableAccentColor?
+    var composerAreaBackgroundColorValue: CodableAccentColor?
+    var textColorValue: CodableAccentColor?
+    var userMessageBackgroundColorValue: CodableAccentColor?
+    var userMessageTextColorValue: CodableAccentColor?
+    var assistantMessageBackgroundColorValue: CodableAccentColor?
+    var assistantMessageTextColorValue: CodableAccentColor?
+    var colorScheme: AppColorSchemePreference
+
+    init(_ appearance: AppAppearance) {
+        accentColorValue = appearance.accentColorValue
+        mainBackgroundColorValue = appearance.mainBackgroundColorValue
+        topBarBackgroundColorValue = appearance.topBarBackgroundColorValue
+        sidebarBackgroundColorValue = appearance.sidebarBackgroundColorValue
+        composerAreaBackgroundColorValue = appearance.composerAreaBackgroundColorValue
+        textColorValue = appearance.textColorValue
+        userMessageBackgroundColorValue = appearance.userMessageBackgroundColorValue
+        userMessageTextColorValue = appearance.userMessageTextColorValue
+        assistantMessageBackgroundColorValue = appearance.assistantMessageBackgroundColorValue
+        assistantMessageTextColorValue = appearance.assistantMessageTextColorValue
+        colorScheme = appearance.colorScheme
+    }
+
+    func apply(to appearance: inout AppAppearance) {
+        appearance.accentColorValue = accentColorValue
+        appearance.mainBackgroundColorValue = mainBackgroundColorValue
+        appearance.topBarBackgroundColorValue = topBarBackgroundColorValue
+        appearance.sidebarBackgroundColorValue = sidebarBackgroundColorValue
+        appearance.composerAreaBackgroundColorValue = composerAreaBackgroundColorValue
+        appearance.textColorValue = textColorValue
+        appearance.userMessageBackgroundColorValue = userMessageBackgroundColorValue
+        appearance.userMessageTextColorValue = userMessageTextColorValue
+        appearance.assistantMessageBackgroundColorValue = assistantMessageBackgroundColorValue
+        appearance.assistantMessageTextColorValue = assistantMessageTextColorValue
+        appearance.colorScheme = colorScheme
     }
 }
 
