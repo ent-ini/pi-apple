@@ -144,12 +144,15 @@ private final class MobilePiJSBridge: NSObject, MobilePiJSBridgeExports {
 
     func deviceInfo() -> NSDictionary {
         #if canImport(UIKit)
+        let info: [String: String]
         if Thread.isMainThread {
-            return MainActor.assumeIsolated { Self.currentDeviceInfo() }
+            info = MainActor.assumeIsolated { Self.currentDeviceInfo() }
+        } else {
+            info = DispatchQueue.main.sync {
+                MainActor.assumeIsolated { Self.currentDeviceInfo() }
+            }
         }
-        return DispatchQueue.main.sync {
-            MainActor.assumeIsolated { Self.currentDeviceInfo() }
-        }
+        return info as NSDictionary
         #else
         return [
             "name": ProcessInfo.processInfo.hostName,
@@ -162,7 +165,7 @@ private final class MobilePiJSBridge: NSObject, MobilePiJSBridgeExports {
 
     #if canImport(UIKit)
     @MainActor
-    private static func currentDeviceInfo() -> NSDictionary {
+    private static func currentDeviceInfo() -> [String: String] {
         let device = UIDevice.current
         return [
             "name": device.name,
@@ -170,10 +173,10 @@ private final class MobilePiJSBridge: NSObject, MobilePiJSBridgeExports {
             "systemVersion": device.systemVersion,
             "model": device.model,
             "localizedModel": device.localizedModel,
-            "batteryLevel": device.batteryLevel,
-            "batteryState": String(describing: device.batteryState.rawValue),
-            "identifierForVendor": device.identifierForVendor?.uuidString as Any
-        ] as NSDictionary
+            "batteryLevel": String(device.batteryLevel),
+            "batteryState": String(device.batteryState.rawValue),
+            "identifierForVendor": device.identifierForVendor?.uuidString ?? ""
+        ]
     }
     #endif
 
