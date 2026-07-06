@@ -190,6 +190,79 @@ private struct MobileSessionRow: View {
     }
 }
 
+@MainActor
+private final class MobileKeyboardObserver: NSObject, ObservableObject, @unchecked Sendable {
+    @Published private(set) var visibleHeight: CGFloat = 0
+    @Published private(set) var animationDuration: TimeInterval = 0.25
+
+    #if canImport(UIKit)
+    nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
+
+    override init() {
+        super.init()
+        let center = NotificationCenter.default
+        observers = [
+            UIResponder.keyboardWillChangeFrameNotification,
+            UIResponder.keyboardWillHideNotification
+        ].map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                let userInfo = notification.userInfo ?? [:]
+                let duration = (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+                let endFrame = (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect)
+                    ?? (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
+                let isHiding = notification.name == UIResponder.keyboardWillHideNotification
+                Task { @MainActor [weak self] in
+                    self?.handleKeyboardChange(isHiding: isHiding, endFrame: endFrame, duration: duration)
+                }
+            }
+        }
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    private func handleKeyboardChange(isHiding: Bool, endFrame: CGRect?, duration: TimeInterval) {
+        animationDuration = duration
+
+        guard !isHiding, let endFrame else {
+            visibleHeight = 0
+            return
+        }
+        visibleHeight = Self.keyboardOverlapHeight(for: endFrame)
+    }
+
+    private static func keyboardOverlapHeight(for endFrame: CGRect) -> CGFloat {
+        guard let window = activeKeyWindow() else {
+            return max(0, UIScreen.main.bounds.maxY - endFrame.minY)
+        }
+        let convertedFrame = window.convert(endFrame, from: nil)
+        guard convertedFrame.isFinite else { return 0 }
+        return max(0, window.bounds.intersection(convertedFrame).height)
+    }
+
+    private static func activeKeyWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+    }
+    #else
+    override init() {
+        super.init()
+    }
+    #endif
+}
+
+private extension CGRect {
+    var isFinite: Bool {
+        origin.x.isFinite
+            && origin.y.isFinite
+            && size.width.isFinite
+            && size.height.isFinite
+    }
+}
+
 private struct MobileScrollViewportPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -211,6 +284,7 @@ private struct MobileSessionDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: MobilePiAppState
     @FocusState private var isComposerFocused: Bool
+    @StateObject private var keyboardObserver = MobileKeyboardObserver()
     @State private var showsModelPicker = false
     @State private var showsThinkingPicker = false
     @State private var showsDefaultModelPicker = false
@@ -226,6 +300,11 @@ private struct MobileSessionDetailView: View {
     @State private var transcriptViewportHeight: CGFloat = 0
     @State private var transcriptBottomMaxY: CGFloat = 0
     @State private var isTranscriptPinnedToBottom = true
+    @State private var stickyAutoScrollUntil: Date?
+    @State private var hasCompletedInitialScrollPlacement = false
+    @State private var bottomScrollWorkItems: [DispatchWorkItem] = []
+    @State private var bottomScrollGeneration = 0
+    @State private var recentTranscriptUserScrollUntil: Date?
     @State private var showsScrollToBottomButton = false
 
     private static let slashCommands: [MobileSlashCommand] = [
@@ -234,8 +313,13 @@ private struct MobileSessionDetailView: View {
     ]
     private static let transcriptCoordinateSpace = "MobileTranscriptScroll"
     private static let transcriptBottomID = "MobileTranscriptBottom"
-    private static let transcriptAutoscrollBuffer: CGFloat = 24
+    private static let transcriptAutoscrollBuffer: CGFloat = 180
+    private static let transcriptBottomReachedEpsilon: CGFloat = 3
     private static let scrollToBottomButtonMinimumDistance: CGFloat = 360
+    private static let stickyAutoScrollDuration: TimeInterval = 30
+    private static let recentUserScrollDuration: TimeInterval = 0.9
+    private static let userScrollBreakawayDistance: CGFloat = 12
+    private static let transcriptScrollSettleDelays: [TimeInterval] = [0.0, 0.08, 0.22]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -261,7 +345,10 @@ private struct MobileSessionDetailView: View {
             composer
         }
         .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+        .padding(.bottom, keyboardObserver.visibleHeight)
         .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .animation(.easeOut(duration: keyboardObserver.animationDuration), value: keyboardObserver.visibleHeight)
         .simultaneousGesture(dismissKeyboardDragGesture)
         .hiddenMobileNavigationBar()
         .task(id: appState.selectedSession?.id) {
@@ -418,91 +505,183 @@ private struct MobileSessionDetailView: View {
     private func transcript(title: String) -> some View {
         let rows = MobileDisplayedRow.groupingToolResults(in: appState.filteredVisibleEvents)
         let scrollSignature = rows.map(\.scrollFingerprint).joined(separator: "|")
-        return ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(rows) { row in
-                        MobileEventRow(row: row)
-                            .id(row.id)
+        return GeometryReader { viewportProxy in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(rows) { row in
+                            MobileEventRow(row: row)
+                                .id(row.id)
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(Self.transcriptBottomID)
+                            .background(
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: MobileScrollBottomPreferenceKey.self,
+                                        value: geometry.frame(in: .named(Self.transcriptCoordinateSpace)).maxY
+                                    )
+                                }
+                            )
                     }
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.transcriptBottomID)
-                        .background(
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: MobileScrollBottomPreferenceKey.self,
-                                    value: geometry.frame(in: .named(Self.transcriptCoordinateSpace)).maxY
-                                )
-                            }
-                        )
+                    .padding()
+                    .frame(minHeight: viewportProxy.size.height, alignment: .top)
                 }
-                .padding()
-            }
-            .coordinateSpace(name: Self.transcriptCoordinateSpace)
-            .background(
-                GeometryReader { geometry in
-                    Color.clear.preference(key: MobileScrollViewportPreferenceKey.self, value: geometry.size.height)
-                }
-            )
-            .scrollContentBackground(.hidden)
-            .contentShape(Rectangle())
-            .mobileScrollDismissesKeyboardImmediately()
-            .simultaneousGesture(dismissKeyboardTapGesture)
-            .simultaneousGesture(dismissKeyboardDragGesture)
-            .overlay {
-                if appState.isLoadingSession && appState.selectedEvents.isEmpty {
-                    ProgressView()
-                }
-            }
-            .onPreferenceChange(MobileScrollViewportPreferenceKey.self) { height in
-                transcriptViewportHeight = height
-                updateTranscriptPinnedState()
-            }
-            .onPreferenceChange(MobileScrollBottomPreferenceKey.self) { maxY in
-                transcriptBottomMaxY = maxY
-                updateTranscriptPinnedState()
-            }
-            .onAppear {
-                isTranscriptPinnedToBottom = true
-                scrollToBottom(proxy: proxy, animated: false)
-            }
-            .onChange(of: scrollSignature) { _, _ in
-                guard isTranscriptPinnedToBottom else { return }
-                scrollToBottom(proxy: proxy, animated: true)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if showsScrollToBottomButton {
-                    Button {
-                        isTranscriptPinnedToBottom = true
-                        showsScrollToBottomButton = false
-                        scrollToBottom(proxy: proxy, animated: true)
-                    } label: {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(appState.appearance.accentColor)
-                            .frame(width: 36, height: 36)
-                            .background(.regularMaterial, in: Circle())
-                            .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
-                            .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 3)
+                .coordinateSpace(name: Self.transcriptCoordinateSpace)
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: MobileScrollViewportPreferenceKey.self, value: geometry.size.height)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Scroll to bottom")
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 16)
-                    .transition(.scale(scale: 0.88).combined(with: .opacity))
+                )
+                .scrollContentBackground(.hidden)
+                .contentShape(Rectangle())
+                .mobileScrollDismissesKeyboardImmediately()
+                .simultaneousGesture(dismissKeyboardTapGesture)
+                .simultaneousGesture(dismissKeyboardDragGesture)
+                .simultaneousGesture(transcriptUserScrollGesture)
+                .overlay {
+                    if appState.isLoadingSession && appState.selectedEvents.isEmpty {
+                        ProgressView()
+                    }
                 }
+                .onPreferenceChange(MobileScrollViewportPreferenceKey.self) { height in
+                    transcriptViewportHeight = height
+                    updateTranscriptPinnedState(scrollProxy: proxy)
+                }
+                .onPreferenceChange(MobileScrollBottomPreferenceKey.self) { maxY in
+                    transcriptBottomMaxY = maxY
+                    updateTranscriptPinnedState(scrollProxy: proxy)
+                }
+                .onAppear {
+                    resetTranscriptScrollState()
+                    scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: true)
+                }
+                .onDisappear {
+                    cancelBottomScrollWorkItems()
+                }
+                .onChange(of: appState.selectedSession?.id) { _, _ in
+                    resetTranscriptScrollState()
+                    scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: true)
+                }
+                .onChange(of: appState.isSending) { _, isSending in
+                    guard isSending else { return }
+                    startStickyAutoScroll()
+                    scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
+                }
+                .onChange(of: keyboardObserver.visibleHeight) { oldHeight, newHeight in
+                    guard newHeight > oldHeight,
+                          isTranscriptPinnedToBottom || isComposerFocused else { return }
+                    startStickyAutoScroll()
+                    scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
+                }
+                .onChange(of: scrollSignature) { _, _ in
+                    scrollToBottomIfNeeded(proxy: proxy)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if showsScrollToBottomButton {
+                        Button {
+                            isTranscriptPinnedToBottom = true
+                            showsScrollToBottomButton = false
+                            startStickyAutoScroll()
+                            scrollToBottomSettled(proxy: proxy, animated: true, completesInitialPlacement: false)
+                        } label: {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(appState.appearance.accentColor)
+                                .frame(width: 36, height: 36)
+                                .background(.regularMaterial, in: Circle())
+                                .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                                .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 3)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Scroll to bottom")
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 16)
+                        .transition(.scale(scale: 0.88).combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.16), value: showsScrollToBottomButton)
             }
-            .animation(.easeOut(duration: 0.16), value: showsScrollToBottomButton)
         }
     }
 
-    private func updateTranscriptPinnedState() {
-        guard transcriptViewportHeight > 0 else { return }
+    private func resetTranscriptScrollState() {
+        cancelBottomScrollWorkItems()
+        isTranscriptPinnedToBottom = true
+        stickyAutoScrollUntil = Date().addingTimeInterval(Self.stickyAutoScrollDuration)
+        hasCompletedInitialScrollPlacement = false
+        showsScrollToBottomButton = false
+        recentTranscriptUserScrollUntil = nil
+    }
+
+    private var isStickyAutoScrollActive: Bool {
+        guard let stickyAutoScrollUntil else { return false }
+        return stickyAutoScrollUntil > Date()
+    }
+
+    private var isRecentTranscriptUserScrollActive: Bool {
+        guard let recentTranscriptUserScrollUntil else { return false }
+        return recentTranscriptUserScrollUntil > Date()
+    }
+
+    private var transcriptUserScrollGesture: some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .local)
+            .onChanged { _ in
+                noteTranscriptUserScrollIntent()
+            }
+    }
+
+    private func noteTranscriptUserScrollIntent() {
+        recentTranscriptUserScrollUntil = Date().addingTimeInterval(Self.recentUserScrollDuration)
+    }
+
+    private func startStickyAutoScroll() {
+        stickyAutoScrollUntil = Date().addingTimeInterval(Self.stickyAutoScrollDuration)
+    }
+
+    private func updateTranscriptPinnedState(scrollProxy: ScrollViewProxy) {
+        guard transcriptViewportHeight > 0,
+              transcriptBottomMaxY.isFinite,
+              transcriptBottomMaxY < .greatestFiniteMagnitude / 2 else { return }
         let distanceFromBottom = transcriptBottomMaxY - transcriptViewportHeight
+        updateScrollToBottomButton(distanceFromBottom: distanceFromBottom)
+
+        if isStickyAutoScrollActive {
+            if isRecentTranscriptUserScrollActive,
+               distanceFromBottom > Self.userScrollBreakawayDistance {
+                stickyAutoScrollUntil = nil
+                isTranscriptPinnedToBottom = false
+                cancelBottomScrollWorkItems()
+                return
+            }
+            isTranscriptPinnedToBottom = true
+            if distanceFromBottom > Self.transcriptBottomReachedEpsilon,
+               bottomScrollWorkItems.isEmpty {
+                scrollToBottomSettled(
+                    proxy: scrollProxy,
+                    animated: false,
+                    completesInitialPlacement: !hasCompletedInitialScrollPlacement
+                )
+            }
+            return
+        }
+
         isTranscriptPinnedToBottom = distanceFromBottom <= Self.transcriptAutoscrollBuffer
+    }
+
+    private func updateScrollToBottomButton(distanceFromBottom: CGFloat) {
         let threshold = max(Self.scrollToBottomButtonMinimumDistance, transcriptViewportHeight * 0.8)
-        showsScrollToBottomButton = distanceFromBottom > threshold
+        let shouldShow = hasCompletedInitialScrollPlacement && distanceFromBottom > threshold
+        if showsScrollToBottomButton != shouldShow {
+            showsScrollToBottomButton = shouldShow
+        }
+    }
+
+    private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
+        guard isTranscriptPinnedToBottom || isStickyAutoScrollActive else { return }
+        startStickyAutoScroll()
+        scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
@@ -510,10 +689,40 @@ private struct MobileSessionDetailView: View {
             proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
         }
         if animated {
-            withAnimation(.snappy) { action() }
+            withAnimation(.easeOut(duration: 0.12)) { action() }
         } else {
             action()
         }
+    }
+
+    private func scrollToBottomSettled(proxy: ScrollViewProxy, animated: Bool, completesInitialPlacement: Bool) {
+        cancelBottomScrollWorkItems()
+        bottomScrollGeneration &+= 1
+        let generation = bottomScrollGeneration
+
+        let workItems = Self.transcriptScrollSettleDelays.enumerated().map { index, delay in
+            let item = DispatchWorkItem {
+                guard bottomScrollGeneration == generation else { return }
+                scrollToBottom(proxy: proxy, animated: animated && index == 0)
+                if index == Self.transcriptScrollSettleDelays.count - 1 {
+                    if completesInitialPlacement {
+                        hasCompletedInitialScrollPlacement = true
+                    }
+                    if bottomScrollGeneration == generation {
+                        bottomScrollWorkItems = []
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            return item
+        }
+        bottomScrollWorkItems = workItems
+    }
+
+    private func cancelBottomScrollWorkItems() {
+        bottomScrollGeneration &+= 1
+        bottomScrollWorkItems.forEach { $0.cancel() }
+        bottomScrollWorkItems = []
     }
 
     private var composer: some View {
