@@ -10,6 +10,8 @@
 		A10000000000000000000005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* Assets.xcassets */; };
 		A10000000000000000000001 /* ApplePiIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* ApplePiIOSApp.swift */; };
 		A10000000000000000000002 /* MobileRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* MobileRootView.swift */; };
+		A10000000000000000000006 /* MobileAppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* MobileAppAppearance.swift */; };
+		A10000000000000000000007 /* MobileMarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* MobileMarkdownText.swift */; };
 		A10000000000000000000003 /* ApplePiCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000031 /* ApplePiCore */; };
 		A10000000000000000000004 /* ApplePiRemote in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000032 /* ApplePiRemote */; };
 /* End PBXBuildFile section */
@@ -18,6 +20,8 @@
 		A10000000000000000000010 /* ApplePiIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ApplePiIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* ApplePiIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ApplePiIOS/App/ApplePiIOSApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* MobileRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ApplePiIOS/Views/MobileRootView.swift; sourceTree = "<group>"; };
+		A10000000000000000000014 /* MobileAppAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ApplePiIOS/App/MobileAppAppearance.swift; sourceTree = "<group>"; };
+		A10000000000000000000015 /* MobileMarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ApplePiIOS/Views/MobileMarkdownText.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -46,7 +50,9 @@
 			children = (
 				A10000000000000000000013 /* Assets.xcassets */,
 				A10000000000000000000011 /* ApplePiIOSApp.swift */,
+				A10000000000000000000014 /* MobileAppAppearance.swift */,
 				A10000000000000000000012 /* MobileRootView.swift */,
+				A10000000000000000000015 /* MobileMarkdownText.swift */,
 			);
 			name = Sources;
 			sourceTree = "<group>";
@@ -136,7 +142,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* ApplePiIOSApp.swift in Sources */,
+				A10000000000000000000006 /* MobileAppAppearance.swift in Sources */,
 				A10000000000000000000002 /* MobileRootView.swift in Sources */,
+				A10000000000000000000007 /* MobileMarkdownText.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
