@@ -30,6 +30,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
         "pi.log"
     ]
 
+    @MainActor
     init(host: PiHostConfiguration, token: String?, onStatus: @escaping @MainActor @Sendable (String) -> Void) {
         self.host = host
         self.token = token?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
@@ -100,6 +101,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
         streamTask = nil
     }
 
+    @MainActor
     private static var platformDeviceName: String {
         #if canImport(UIKit)
         return UIDevice.current.name
@@ -108,6 +110,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
         #endif
     }
 
+    @MainActor
     private static func platformDeviceIdentifier() -> String {
         #if canImport(UIKit)
         return UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
@@ -141,6 +144,25 @@ private final class MobilePiJSBridge: NSObject, MobilePiJSBridgeExports {
 
     func deviceInfo() -> NSDictionary {
         #if canImport(UIKit)
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { Self.currentDeviceInfo() }
+        }
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated { Self.currentDeviceInfo() }
+        }
+        #else
+        return [
+            "name": ProcessInfo.processInfo.hostName,
+            "systemName": "macOS",
+            "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
+            "model": "ApplePiIOS SwiftPM host"
+        ] as NSDictionary
+        #endif
+    }
+
+    #if canImport(UIKit)
+    @MainActor
+    private static func currentDeviceInfo() -> NSDictionary {
         let device = UIDevice.current
         return [
             "name": device.name,
@@ -152,15 +174,8 @@ private final class MobilePiJSBridge: NSObject, MobilePiJSBridgeExports {
             "batteryState": String(describing: device.batteryState.rawValue),
             "identifierForVendor": device.identifierForVendor?.uuidString as Any
         ] as NSDictionary
-        #else
-        return [
-            "name": ProcessInfo.processInfo.hostName,
-            "systemName": "macOS",
-            "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
-            "model": "ApplePiIOS SwiftPM host"
-        ] as NSDictionary
-        #endif
     }
+    #endif
 
     func appInfo() -> NSDictionary {
         let bundle = Bundle.main
