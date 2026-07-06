@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import ApplePiCore
 
 #if canImport(UIKit)
@@ -199,6 +200,8 @@ private struct MobileSessionDetailView: View {
     @State private var showsDefaultThinkingPicker = false
     @State private var showsSubagents = false
     @State private var showsRenameAlert = false
+    @State private var showsFileImporter = false
+    @State private var draftAttachments: [ChatAttachment] = []
     @State private var renameDraftTitle = ""
 
     var body: some View {
@@ -267,11 +270,22 @@ private struct MobileSessionDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .fileImporter(
+            isPresented: $showsFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true,
+            onCompletion: handleFileImporterResult
+        )
+        .mobileBackSwipe { dismiss() }
         .onAppear {
             appState.setChatVisible(true)
         }
         .onDisappear {
             appState.setChatVisible(false)
+            if !appState.isSending {
+                cleanupAttachments(draftAttachments)
+                draftAttachments = []
+            }
         }
     }
 
@@ -320,6 +334,9 @@ private struct MobileSessionDetailView: View {
                 }
 
                 Divider()
+
+                Button("Context: \(appState.selectedContextUsageDisplayName)") {}
+                    .disabled(true)
 
                 Button("Model: \(appState.selectedModelDisplayName)") {
                     showsModelPicker = true
@@ -394,28 +411,54 @@ private struct MobileSessionDetailView: View {
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            MobileComposerIconButton(systemName: "plus", isDisabled: true) {}
-
-            TextField("Message pi…", text: $appState.draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...5)
-                .focused($isComposerFocused)
-                .padding(.vertical, 8)
-                .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
-
-            MobileComposerIconButton(systemName: "mic.fill") {
-                appState.showStatus("Voice recording will use pi-appd transcription next.")
+        VStack(alignment: .leading, spacing: 7) {
+            if !draftAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(draftAttachments) { attachment in
+                            MobileComposerAttachmentPreview(attachment: attachment) {
+                                removeAttachment(attachment)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 1)
+                }
             }
 
-            MobileComposerIconButton(
-                systemName: "arrow.up",
-                isDisabled: appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ) {
-                isComposerFocused = true
-                Task {
-                    await appState.sendDraft()
-                    await MainActor.run { isComposerFocused = true }
+            HStack(alignment: .bottom, spacing: 10) {
+                MobileComposerIconButton(systemName: "plus", isDisabled: appState.isSending) {
+                    showsFileImporter = true
+                }
+
+                TextField("Message pi…", text: $appState.draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...5)
+                    .focused($isComposerFocused)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+
+                MobileComposerIconButton(systemName: "mic.fill") {
+                    appState.showStatus("Voice recording will use pi-appd transcription next.")
+                }
+
+                MobileComposerIconButton(
+                    systemName: "arrow.up",
+                    isDisabled: !canSendDraft
+                ) {
+                    isComposerFocused = true
+                    let attachmentsToSend = draftAttachments
+                    Task {
+                        let sent = await appState.sendDraft(attachments: attachmentsToSend)
+                        await MainActor.run {
+                            if sent {
+                                if draftAttachments == attachmentsToSend {
+                                    draftAttachments = []
+                                }
+                                cleanupAttachments(attachmentsToSend)
+                            }
+                            isComposerFocused = true
+                        }
+                    }
                 }
             }
         }
@@ -432,6 +475,157 @@ private struct MobileSessionDetailView: View {
         .padding(.horizontal, 14)
         .padding(.top, 6)
         .padding(.bottom, 8)
+    }
+
+    private var canSendDraft: Bool {
+        !appState.isSending && (!appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty)
+    }
+
+    private func handleFileImporterResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            addAttachments(from: urls)
+        case .failure(let error):
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+
+    private func addAttachments(from urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        do {
+            let staged = try urls.map { try MobileAttachmentStagingService.stageFile(at: $0) }
+            for attachment in staged where !draftAttachments.contains(where: { $0.fileURL == attachment.fileURL }) {
+                draftAttachments.append(attachment)
+            }
+        } catch {
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+
+    private func removeAttachment(_ attachment: ChatAttachment) {
+        draftAttachments.removeAll { $0.id == attachment.id }
+        cleanupAttachments([attachment])
+    }
+
+    private func cleanupAttachments(_ attachments: [ChatAttachment]) {
+        for attachment in attachments {
+            try? FileManager.default.removeItem(at: attachment.fileURL)
+        }
+    }
+}
+
+private enum MobileAttachmentStagingService {
+    static func stageFile(at sourceURL: URL) throws -> ChatAttachment {
+        let scoped = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { sourceURL.stopAccessingSecurityScopedResource() }
+        }
+
+        let destinationURL = try makeDestinationURL(
+            suggestedName: sourceURL.lastPathComponent,
+            preferredExtension: sourceURL.pathExtension.nilIfBlank
+        )
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+
+        let values = try destinationURL.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
+        let type = values.contentType
+        return ChatAttachment(
+            kind: chatAttachmentKind(for: type),
+            fileURL: destinationURL,
+            displayName: sourceURL.lastPathComponent.nilIfBlank ?? destinationURL.lastPathComponent,
+            mimeType: type?.preferredMIMEType,
+            size: values.fileSize.map(Int64.init)
+        )
+    }
+
+    private static func makeDestinationURL(suggestedName: String, preferredExtension: String?) throws -> URL {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let directory = support.appendingPathComponent("ApplePiIOS/attachments", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let rawBaseName = URL(fileURLWithPath: suggestedName).deletingPathExtension().lastPathComponent
+        let sanitizedBaseName = rawBaseName
+            .replacingOccurrences(of: #"[^A-Za-z0-9._ -]+"#, with: "_", options: .regularExpression)
+            .nilIfBlank ?? "attachment"
+        let uniqueName = "\(sanitizedBaseName)-\(UUID().uuidString)"
+        if let ext = preferredExtension?.nilIfBlank {
+            return directory.appendingPathComponent(uniqueName).appendingPathExtension(ext)
+        }
+        return directory.appendingPathComponent(uniqueName)
+    }
+
+    private static func chatAttachmentKind(for type: UTType?) -> ChatAttachment.Kind {
+        guard let type else { return .file }
+        if type.conforms(to: .image) { return .image }
+        if type.conforms(to: .audio) { return .audio }
+        return .file
+    }
+}
+
+private struct MobileComposerAttachmentPreview: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appState: MobilePiAppState
+    let attachment: ChatAttachment
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: iconName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(appState.appearance.accentColor)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(attachment.displayName)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: 150, alignment: .leading)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .disabled(appState.isSending)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(MobileTheme.controlTint(for: resolvedColorScheme, opacity: 0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var iconName: String {
+        switch attachment.kind {
+        case .image: return "photo"
+        case .audio: return "waveform"
+        case .file: return "doc"
+        }
+    }
+
+    private var subtitle: String? {
+        if let size = attachment.size {
+            return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        }
+        return attachment.mimeType
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        appState.appearance.resolvedColorScheme(current: colorScheme)
     }
 }
 
@@ -721,7 +915,12 @@ private enum MobileMessageTextSanitizer {
             with: "\n",
             options: .regularExpression
         )
-        let collapsed = withoutTelegramTopic.replacingOccurrences(
+        let withoutFileTags = withoutTelegramTopic.replacingOccurrences(
+            of: #"<file\s+name=\"[^\"]*\">\[([^\]]+)\]</file>"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        let collapsed = withoutFileTags.replacingOccurrences(
             of: #"\n{3,}"#,
             with: "\n\n",
             options: .regularExpression
@@ -1262,6 +1461,13 @@ private struct MobileSubagentsView: View {
                 Button("Done") { dismiss() }
             }
         }
+        .mobileBackSwipe {
+            if selectedSubagentID != nil {
+                selectedSubagentID = nil
+            } else {
+                dismiss()
+            }
+        }
         .onChange(of: subagents.map(\.id)) { _, ids in
             guard let selectedSubagentID, !ids.contains(selectedSubagentID) else { return }
             self.selectedSubagentID = nil
@@ -1669,6 +1875,7 @@ private struct MobileSearchField: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: MobilePiAppState
     @Binding var text: String
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1676,6 +1883,7 @@ private struct MobileSearchField: View {
                 .foregroundStyle(.secondary)
             TextField("Search sessions", text: $text)
                 .textFieldStyle(.plain)
+                .focused($isFocused)
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
                 #endif
@@ -1683,6 +1891,8 @@ private struct MobileSearchField: View {
             if !text.isEmpty {
                 Button {
                     text = ""
+                    isFocused = false
+                    dismissKeyboard()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.tertiary)
@@ -1698,6 +1908,12 @@ private struct MobileSearchField: View {
 
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+
+    private func dismissKeyboard() {
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
 }
 
@@ -1763,6 +1979,19 @@ private struct MobileBlobModifier: ViewModifier {
 private extension View {
     func mobileBlobStyle(colorScheme: ColorScheme) -> some View {
         modifier(MobileBlobModifier(colorScheme: colorScheme))
+    }
+
+    func mobileBackSwipe(edgeWidth: CGFloat = 44, action: @escaping () -> Void) -> some View {
+        simultaneousGesture(
+            DragGesture(minimumDistance: 24, coordinateSpace: .local)
+                .onEnded { value in
+                    guard value.startLocation.x <= edgeWidth,
+                          value.translation.width > 72,
+                          abs(value.translation.height) < 80,
+                          value.predictedEndTranslation.width > 96 else { return }
+                    action()
+                }
+        )
     }
 
     @ViewBuilder

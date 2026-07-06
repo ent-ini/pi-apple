@@ -123,6 +123,10 @@ final class MobilePiAppState: ObservableObject {
         selectedRuntime?.thinkingLevel ?? "off"
     }
 
+    var selectedContextUsageDisplayName: String {
+        Self.contextUsageDisplayName(selectedRuntime?.contextUsage)
+    }
+
     var isSelectedSessionBusy: Bool {
         isSending || isLoadingSession || isLoadingRuntime || (selectedSession?.isGenerating == true)
     }
@@ -463,24 +467,27 @@ final class MobilePiAppState: ObservableObject {
         appearance = copy
     }
 
-    func sendDraft() async {
+    @discardableResult
+    func sendDraft(attachments: [ChatAttachment] = []) async -> Bool {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return }
+        guard !prompt.isEmpty || !attachments.isEmpty else { return false }
+        let effectivePrompt = prompt.isEmpty ? "Please inspect the attached item(s)." : prompt
         let startsNewSession = selectedSession == nil
         let sessionTitleForSource = selectedSession?.title ?? "New Session"
-        let taggedPrompt = sourceTaggedAppPrompt(prompt, sessionTitle: sessionTitleForSource)
+        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, sessionTitle: sessionTitleForSource)
         draft = ""
         if startsNewSession {
             resetSelectedTranscript()
         }
-        appendOptimisticUserMessage(taggedPrompt)
+        appendOptimisticUserMessage(taggedPrompt, attachments: attachments)
         isSending = true
         defer { isSending = false }
 
         let host = host
         do {
+            let uploadedAttachments = try await uploadAttachmentsIfNeeded(attachments)
             if let selectedSession {
-                try await RemoteDaemonClient().streamSend(host: host, sessionID: selectedSession.id, prompt: taggedPrompt) { event in
+                try await RemoteDaemonClient().streamSend(host: host, sessionID: selectedSession.id, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
                     await self.handleTurnStreamEvent(event)
                 }
             } else {
@@ -492,17 +499,19 @@ final class MobilePiAppState: ObservableObject {
                     request.hasExplicitInitialModel = true
                     request.hasExplicitInitialThinkingLevel = defaultModelPreference.thinkingLevel?.nilIfBlank != nil
                 }
-                try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt) { event in
+                try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
                     await self.handleTurnStreamEvent(event)
                 }
             }
             await catchUpSelectedSession(reason: "send complete")
             await reloadCatalog(quietly: true)
             startSelectedSessionStreamIfPossible()
+            return true
         } catch {
             statusMessage = error.localizedDescription
             await catchUpSelectedSession(reason: "send error")
             startSelectedSessionStreamIfPossible()
+            return false
         }
     }
 
@@ -735,11 +744,13 @@ final class MobilePiAppState: ObservableObject {
         sortSelectedEventsForDisplay()
     }
 
-    private func appendOptimisticUserMessage(_ prompt: String) {
+    private func appendOptimisticUserMessage(_ prompt: String, attachments: [ChatAttachment]) {
+        var content = attachments.map { Self.optimisticContentBlock(for: $0) }
+        content.append(.text(prompt))
         let message = Message(
             id: "optimistic-user-\(UUID().uuidString)",
             role: .user,
-            content: [.text(prompt)],
+            content: content,
             model: nil,
             timestamp: Date(),
             parentId: nil
@@ -802,6 +813,28 @@ final class MobilePiAppState: ObservableObject {
         guard text.count > Self.maxStoredTextCharacters else { return text }
         let prefix = String(text.prefix(Self.maxStoredTextCharacters))
         return "\(prefix)\n\n… \(label) truncated on iPhone to reduce memory (\(text.count) characters total). Open the session on Mac for the full content."
+    }
+
+    private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment]) async throws -> [UploadedAttachmentReference] {
+        guard !attachments.isEmpty else { return [] }
+        let client = RemoteDaemonClient()
+        var uploaded: [UploadedAttachmentReference] = []
+        uploaded.reserveCapacity(attachments.count)
+        for attachment in attachments {
+            uploaded.append(try await client.uploadAttachment(host: host, attachment: attachment))
+        }
+        return uploaded
+    }
+
+    private static func optimisticContentBlock(for attachment: ChatAttachment) -> ContentBlock {
+        switch attachment.kind {
+        case .image:
+            return .image(path: attachment.filePath, mime: attachment.mimeType)
+        case .file:
+            return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Binary file attached: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
+        case .audio:
+            return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Audio attachment: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
+        }
     }
 
     private func upsertSelectedEvent(_ event: SessionEvent, allowPersistedToWin: Bool) {
@@ -903,6 +936,24 @@ final class MobilePiAppState: ObservableObject {
                 }
                 return $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending
             }
+    }
+
+    private static func contextUsageDisplayName(_ usage: SessionContextUsage?) -> String {
+        guard let usage else { return "unknown" }
+        let used = compactTokenCount(usage.tokens)
+        let window = compactTokenCount(usage.contextWindow)
+        if let percent = usage.percent {
+            return "\(used)/\(window) · \(Int(percent.rounded()))%"
+        }
+        return "\(used)/\(window)"
+    }
+
+    private static func compactTokenCount(_ value: Int?) -> String {
+        guard let value else { return "?" }
+        if value < 1_000 { return "\(value)" }
+        if value < 10_000 { return String(format: "%.1fk", Double(value) / 1_000) }
+        if value < 1_000_000 { return "\(Int(round(Double(value) / 1_000)))k" }
+        return String(format: "%.1fM", Double(value) / 1_000_000)
     }
 
     private func sourceTaggedAppPrompt(_ text: String, sessionTitle: String) -> String {
@@ -1021,5 +1072,12 @@ private extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var xmlEscapedForPrompt: String {
+        replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }
