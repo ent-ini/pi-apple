@@ -452,7 +452,7 @@ private struct MobileSessionDetailView: View {
             .simultaneousGesture(dismissKeyboardDragGesture)
             .overlay {
                 if appState.isLoadingSession && appState.selectedEvents.isEmpty {
-                    ProgressView("Loading \(title)…")
+                    ProgressView()
                 }
             }
             .onPreferenceChange(MobileScrollViewportPreferenceKey.self) { height in
@@ -540,7 +540,7 @@ private struct MobileSessionDetailView: View {
                     showsFileImporter = true
                 }
 
-                TextField("Message pi…", text: $appState.draft, axis: .vertical)
+                TextField("", text: $appState.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
                     .focused($isComposerFocused)
