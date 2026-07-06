@@ -142,10 +142,13 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     }
 
     private func execute(job: RemoteDeviceJobRecord) async -> MobileDeviceScriptExecutionResult {
-        let deviceInfoSnapshot = deviceInfoSnapshot
-        return await Task.detached(priority: .userInitiated) {
-            MobileJavaScriptExecutor(deviceInfo: deviceInfoSnapshot).run(script: job.script, timeoutSeconds: job.timeoutSeconds ?? 30)
-        }.value
+        // JavaScriptCore is happiest when driven from the app's main run loop
+        // on iOS. Jobs are trusted and short-lived, so execute synchronously
+        // here instead of hopping to a detached background task.
+        MobileJavaScriptExecutor(deviceInfo: deviceInfoSnapshot).run(
+            script: job.script,
+            timeoutSeconds: job.timeoutSeconds ?? 30
+        )
     }
 }
 
