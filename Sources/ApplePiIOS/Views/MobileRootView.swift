@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import ApplePiCore
+import ApplePiRemote
 
 #if canImport(UIKit)
 import UIKit
@@ -218,6 +219,9 @@ private struct MobileSessionDetailView: View {
     @State private var showsRenameAlert = false
     @State private var showsFileImporter = false
     @State private var draftAttachments: [ChatAttachment] = []
+    @StateObject private var audioRecorder = MobileAudioRecordingController()
+    @State private var isTranscribingAudio = false
+    @State private var voiceTranscriptionTask: Task<Void, Never>?
     @State private var renameDraftTitle = ""
     @State private var transcriptViewportHeight: CGFloat = 0
     @State private var transcriptBottomMaxY: CGFloat = 0
@@ -309,6 +313,14 @@ private struct MobileSessionDetailView: View {
                 cleanupAttachments(draftAttachments)
                 draftAttachments = []
             }
+        }
+        .onDisappear {
+            if audioRecorder.isRecording {
+                audioRecorder.cancelRecording()
+            }
+            voiceTranscriptionTask?.cancel()
+            voiceTranscriptionTask = nil
+            isTranscribingAudio = false
         }
     }
 
@@ -495,8 +507,8 @@ private struct MobileSessionDetailView: View {
                     .padding(.vertical, 8)
                     .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
 
-                MobileComposerIconButton(systemName: "mic.fill") {
-                    appState.showStatus("Voice recording will use pi-appd transcription next.")
+                MobileComposerIconButton(systemName: audioRecorder.isRecording ? "stop.fill" : "mic.fill", isDisabled: isTranscribingAudio) {
+                    handleMicrophoneTapped()
                 }
 
                 MobileComposerIconButton(
@@ -537,6 +549,95 @@ private struct MobileSessionDetailView: View {
 
     private var canSendDraft: Bool {
         !appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty
+    }
+
+    private func handleMicrophoneTapped() {
+        if audioRecorder.isRecording {
+            finishVoiceRecording()
+            return
+        }
+        guard !isTranscribingAudio else { return }
+
+        switch MobileAudioRecordingController.microphoneAuthorizationStatus() {
+        case .authorized:
+            startVoiceRecording()
+        case .notDetermined:
+            appState.showStatus("Requesting microphone access…")
+            MobileAudioRecordingController.requestMicrophoneAccess { granted in
+                Task { @MainActor in
+                    if granted {
+                        startVoiceRecording()
+                    } else {
+                        appState.showStatus(MobileAudioRecordingError.microphonePermissionDenied.localizedDescription)
+                    }
+                }
+            }
+        case .denied, .restricted:
+            appState.showStatus(MobileAudioRecordingError.microphonePermissionDenied.localizedDescription)
+        @unknown default:
+            appState.showStatus(MobileAudioRecordingError.microphonePermissionDenied.localizedDescription)
+        }
+    }
+
+    private func startVoiceRecording() {
+        do {
+            try audioRecorder.startRecordingAuthorized()
+            appState.showStatus("Recording voice… tap stop to transcribe.")
+        } catch {
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+
+    private func finishVoiceRecording() {
+        do {
+            let recordingURL = try audioRecorder.stopRecording()
+            transcribeVoiceRecording(recordingURL)
+        } catch {
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+
+    private func transcribeVoiceRecording(_ fileURL: URL) {
+        isTranscribingAudio = true
+        appState.showStatus("Transcribing voice…")
+        voiceTranscriptionTask?.cancel()
+        voiceTranscriptionTask = Task {
+            do {
+                let transcript = try await RemoteDaemonClient().transcribeAudio(
+                    host: appState.host,
+                    fileURL: fileURL,
+                    tokenOverride: appState.daemonToken.nilIfBlank
+                )
+                try? FileManager.default.removeItem(at: fileURL)
+                await MainActor.run {
+                    mergeVoiceTranscript(transcript)
+                    isTranscribingAudio = false
+                    voiceTranscriptionTask = nil
+                    appState.showStatus("Voice transcribed.")
+                    isComposerFocused = true
+                }
+            } catch is CancellationError {
+                try? FileManager.default.removeItem(at: fileURL)
+                await MainActor.run {
+                    isTranscribingAudio = false
+                    voiceTranscriptionTask = nil
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: fileURL)
+                await MainActor.run {
+                    isTranscribingAudio = false
+                    voiceTranscriptionTask = nil
+                    appState.showStatus(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func mergeVoiceTranscript(_ transcript: String) {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let current = appState.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        appState.draft = current.isEmpty ? trimmed : "\(current)\n\(trimmed)"
     }
 
     private func handleFileImporterResult(_ result: Result<[URL], Error>) {

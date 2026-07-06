@@ -257,16 +257,17 @@ type attachmentReference struct {
 }
 
 type createSessionRequest struct {
-	SessionID            string                `json:"sessionId"`
-	WorkingDirectory     string                `json:"workingDirectory"`
-	SessionName          string                `json:"sessionName"`
-	IsTemporary          bool                  `json:"isTemporary"`
-	Prompt               string                `json:"prompt"`
-	ForkPath             string                `json:"forkPath"`
-	Attachments          []attachmentReference `json:"attachments"`
-	InitialModelProvider string                `json:"initialModelProvider"`
-	InitialModelID       string                `json:"initialModelId"`
-	InitialThinkingLevel string                `json:"initialThinkingLevel"`
+	SessionID               string                `json:"sessionId"`
+	WorkingDirectory        string                `json:"workingDirectory"`
+	SessionName             string                `json:"sessionName"`
+	IsTemporary             bool                  `json:"isTemporary"`
+	Prompt                  string                `json:"prompt"`
+	ForkPath                string                `json:"forkPath"`
+	Attachments             []attachmentReference `json:"attachments"`
+	InitialModelProvider    string                `json:"initialModelProvider"`
+	InitialModelID          string                `json:"initialModelId"`
+	InitialThinkingLevel    string                `json:"initialThinkingLevel"`
+	KeepRunningOnDisconnect bool                  `json:"keepRunningOnDisconnect"`
 }
 
 type sendSessionRequest struct {
@@ -1219,7 +1220,11 @@ func (s *server) handleCreateSessionRequest(w http.ResponseWriter, r *http.Reque
 	}
 
 	title := firstNonBlank(strings.TrimSpace(request.SessionName), filepath.Base(cwd), "Pi")
-	if err := s.streamPiRPCCommand(w, r.Context().Done(), cwd, args, rpcPrompt, prePromptCommands, nil, title, cwd); err != nil {
+	requestDone := r.Context().Done()
+	if request.KeepRunningOnDisconnect || isDetachedClientPrompt(request.Prompt) {
+		requestDone = nil
+	}
+	if err := s.streamPiRPCCommand(w, requestDone, cwd, args, rpcPrompt, prePromptCommands, nil, title, cwd); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1235,6 +1240,9 @@ func (s *server) handleSessionSend(w http.ResponseWriter, r *http.Request, recor
 }
 
 func (s *server) handleSessionInputRequest(w http.ResponseWriter, requestDone <-chan struct{}, sessionID string, request createSessionRequest) {
+	if request.KeepRunningOnDisconnect || isDetachedClientPrompt(request.Prompt) {
+		requestDone = nil
+	}
 	if s.activeRunForSession(sessionID) != nil {
 		s.handleSessionSendToActiveRunFromRequest(w, sessionID, sendSessionRequest{Prompt: request.Prompt, Attachments: request.Attachments}, nil)
 		return
@@ -1802,6 +1810,11 @@ func textprotoMIMEHeader(values map[string]string) textproto.MIMEHeader {
 	return header
 }
 
+func isDetachedClientPrompt(prompt string) bool {
+	trimmed := strings.TrimSpace(prompt)
+	return strings.HasPrefix(trimmed, "[source:pi-ios-app ") || strings.HasPrefix(trimmed, "[source:pi-ios-app]")
+}
+
 func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentReference) (rpcPromptCommand, error) {
 	if len(attachments) > maxAttachmentCount {
 		return rpcPromptCommand{}, errors.New("too many attachments")
@@ -2156,17 +2169,19 @@ func (s *server) streamPiRPCCommand(
 	}
 
 	closeStdin := run.close
-	go func() {
-		<-requestDone
-		_ = run.write(rpcSimpleCommand{ID: "pi-appd-client-disconnect-abort", Type: "abort"})
-		select {
-		case <-processDone:
-		case <-time.After(streamDisconnectKillGrace):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+	if requestDone != nil {
+		go func() {
+			<-requestDone
+			_ = run.write(rpcSimpleCommand{ID: "pi-appd-client-disconnect-abort", Type: "abort"})
+			select {
+			case <-processDone:
+			case <-time.After(streamDisconnectKillGrace):
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	for {

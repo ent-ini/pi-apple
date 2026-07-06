@@ -610,7 +610,7 @@ final class MobilePiAppState: ObservableObject {
         do {
             let uploadedAttachments = try await uploadAttachmentsIfNeeded(attachments)
             if let sessionID = initialSessionID {
-                try await RemoteDaemonClient().streamSend(host: host, sessionID: sessionID, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
+                try await RemoteDaemonClient().streamSend(host: host, sessionID: sessionID, prompt: taggedPrompt, attachments: uploadedAttachments, keepRunningOnDisconnect: true) { event in
                     await self.handleTurnStreamEvent(event, context: context)
                 }
             } else {
@@ -622,7 +622,7 @@ final class MobilePiAppState: ObservableObject {
                     request.hasExplicitInitialModel = true
                     request.hasExplicitInitialThinkingLevel = defaultModelPreference.thinkingLevel?.nilIfBlank != nil
                 }
-                try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt, attachments: uploadedAttachments) { event in
+                try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt, attachments: uploadedAttachments, keepRunningOnDisconnect: true) { event in
                     await self.handleTurnStreamEvent(event, context: context)
                 }
             }

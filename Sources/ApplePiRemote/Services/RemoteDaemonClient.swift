@@ -412,6 +412,7 @@ public struct RemoteDaemonClient: Sendable {
         request: PiLaunchRequest,
         prompt: String,
         attachments: [UploadedAttachmentReference] = [],
+        keepRunningOnDisconnect: Bool = false,
         onEvent: @escaping @Sendable (PiTurnStreamEvent) async -> Void
     ) async throws {
         let body = InputRequestBody(
@@ -424,7 +425,8 @@ public struct RemoteDaemonClient: Sendable {
             attachments: attachments,
             initialModelProvider: request.initialModelProvider,
             initialModelId: request.initialModelID,
-            initialThinkingLevel: request.initialThinkingLevel
+            initialThinkingLevel: request.initialThinkingLevel,
+            keepRunningOnDisconnect: keepRunningOnDisconnect
         )
         try await stream(
             host: host,
@@ -440,9 +442,10 @@ public struct RemoteDaemonClient: Sendable {
         sessionID: String,
         prompt: String,
         attachments: [UploadedAttachmentReference] = [],
+        keepRunningOnDisconnect: Bool = false,
         onEvent: @escaping @Sendable (PiTurnStreamEvent) async -> Void
     ) async throws {
-        let body = InputRequestBody(sessionId: sessionID, prompt: prompt, attachments: attachments)
+        let body = InputRequestBody(sessionId: sessionID, prompt: prompt, attachments: attachments, keepRunningOnDisconnect: keepRunningOnDisconnect)
         var attempt = 0
         while true {
             do {
@@ -1382,6 +1385,7 @@ private struct InputRequestBody: Encodable {
     let initialModelProvider: String?
     let initialModelId: String?
     let initialThinkingLevel: String?
+    let keepRunningOnDisconnect: Bool
 
     init(
         sessionId: String?,
@@ -1393,7 +1397,8 @@ private struct InputRequestBody: Encodable {
         attachments: [UploadedAttachmentReference],
         initialModelProvider: String? = nil,
         initialModelId: String? = nil,
-        initialThinkingLevel: String? = nil
+        initialThinkingLevel: String? = nil,
+        keepRunningOnDisconnect: Bool = false
     ) {
         self.sessionId = sessionId
         self.workingDirectory = workingDirectory
@@ -1405,6 +1410,7 @@ private struct InputRequestBody: Encodable {
         self.initialModelProvider = initialModelProvider
         self.initialModelId = initialModelId
         self.initialThinkingLevel = initialThinkingLevel
+        self.keepRunningOnDisconnect = keepRunningOnDisconnect
     }
 }
 

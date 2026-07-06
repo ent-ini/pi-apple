@@ -73,6 +73,18 @@ func TestBoundedFileModTimeClampsFutureTimestamps(t *testing.T) {
 	}
 }
 
+func TestIsDetachedClientPromptDetectsIOSSourceTag(t *testing.T) {
+	if !isDetachedClientPrompt("[source:pi-ios-app type=text session=\"S\"]\nhello") {
+		t.Fatal("iOS source tag should detach runs from client disconnects")
+	}
+	if !isDetachedClientPrompt("  [source:pi-ios-app]\nhello") {
+		t.Fatal("bare iOS source tag should detach runs from client disconnects")
+	}
+	if isDetachedClientPrompt("[source:pi-macos-app type=text]\nhello") {
+		t.Fatal("macOS source tag should keep existing disconnect semantics")
+	}
+}
+
 func TestSplitJSONLLinesDropsOnlyTrailingEmptyLine(t *testing.T) {
 	if lines := splitJSONLLines([]byte{}); len(lines) != 0 {
 		t.Fatalf("empty input = %#v, want []", lines)
