@@ -226,6 +226,7 @@ private struct MobileSessionDetailView: View {
     @State private var transcriptViewportHeight: CGFloat = 0
     @State private var transcriptBottomMaxY: CGFloat = 0
     @State private var isTranscriptPinnedToBottom = true
+    @State private var showsScrollToBottomButton = false
 
     private static let slashCommands: [MobileSlashCommand] = [
         MobileSlashCommand(name: "/abort", description: "Stop the active run"),
@@ -234,6 +235,7 @@ private struct MobileSessionDetailView: View {
     private static let transcriptCoordinateSpace = "MobileTranscriptScroll"
     private static let transcriptBottomID = "MobileTranscriptBottom"
     private static let transcriptAutoscrollBuffer: CGFloat = 24
+    private static let scrollToBottomButtonMinimumDistance: CGFloat = 360
 
     var body: some View {
         VStack(spacing: 0) {
@@ -466,6 +468,29 @@ private struct MobileSessionDetailView: View {
                 guard isTranscriptPinnedToBottom else { return }
                 scrollToBottom(proxy: proxy, animated: true)
             }
+            .overlay(alignment: .bottomTrailing) {
+                if showsScrollToBottomButton {
+                    Button {
+                        isTranscriptPinnedToBottom = true
+                        showsScrollToBottomButton = false
+                        scrollToBottom(proxy: proxy, animated: true)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(appState.appearance.accentColor)
+                            .frame(width: 36, height: 36)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                            .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Scroll to bottom")
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 16)
+                    .transition(.scale(scale: 0.88).combined(with: .opacity))
+                }
+            }
+            .animation(.easeOut(duration: 0.16), value: showsScrollToBottomButton)
         }
     }
 
@@ -473,6 +498,8 @@ private struct MobileSessionDetailView: View {
         guard transcriptViewportHeight > 0 else { return }
         let distanceFromBottom = transcriptBottomMaxY - transcriptViewportHeight
         isTranscriptPinnedToBottom = distanceFromBottom <= Self.transcriptAutoscrollBuffer
+        let threshold = max(Self.scrollToBottomButtonMinimumDistance, transcriptViewportHeight * 0.8)
+        showsScrollToBottomButton = distanceFromBottom > threshold
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {

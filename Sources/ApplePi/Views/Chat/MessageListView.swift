@@ -24,6 +24,7 @@ struct MessageListView: View {
     @State private var ensureVisibleGeneration = 0
     @State private var recentUserScrollUntil: Date?
     @State private var historyLoadRowMinY: CGFloat = .greatestFiniteMagnitude
+    @State private var showsScrollToBottomButton = false
     @State private var displayedRowsCache: [DisplayedSessionRow] = []
     @State private var fileReferenceBaseDirectoryCache: String?
 
@@ -115,6 +116,20 @@ struct MessageListView: View {
                     }
                     scrollToBottomSettled(using: scrollProxy, animated: false, completesInitialPlacement: true)
                 }
+                .overlay(alignment: .bottomTrailing) {
+                    if showsScrollToBottomButton {
+                        scrollToBottomButton {
+                            isAnchoredToBottom = true
+                            showsScrollToBottomButton = false
+                            startStickyAutoScroll()
+                            scrollToBottomSettled(using: scrollProxy, animated: true, completesInitialPlacement: false)
+                        }
+                        .padding(.trailing, 22)
+                        .padding(.bottom, 18)
+                        .transition(.scale(scale: 0.88).combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.16), value: showsScrollToBottomButton)
                 .onDisappear {
                     cancelBottomScrollWorkItems()
                     cancelEnsureVisibleWorkItems()
@@ -133,6 +148,7 @@ struct MessageListView: View {
     // up break away from the live tail.
     private static let stickyBreakawayDistance: CGFloat = 260
     private static let bottomReachedEpsilon: CGFloat = 3
+    private static let scrollToBottomButtonMinimumDistance: CGFloat = 360
     private static let stickyAutoScrollDuration: TimeInterval = 30
     private static let recentUserScrollDuration: TimeInterval = 0.9
     private static let userScrollBreakawayDistance: CGFloat = 12
@@ -246,6 +262,7 @@ struct MessageListView: View {
             return
         }
         let distanceToBottom = bottomMaxY - viewportHeight
+        updateScrollToBottomButton(distanceToBottom: distanceToBottom, viewportHeight: viewportHeight)
         if isStickyAutoScrollActive {
             if isRecentUserScrollActive, distanceToBottom > Self.userScrollBreakawayDistance {
                 stickyAutoScrollUntil = nil
@@ -266,6 +283,30 @@ struct MessageListView: View {
             return
         }
         isAnchoredToBottom = distanceToBottom <= Self.bottomStickinessBuffer
+    }
+
+    private func updateScrollToBottomButton(distanceToBottom: CGFloat, viewportHeight: CGFloat) {
+        let threshold = max(Self.scrollToBottomButtonMinimumDistance, viewportHeight * 0.8)
+        let shouldShow = hasCompletedInitialPlacement && distanceToBottom > threshold
+        if showsScrollToBottomButton != shouldShow {
+            showsScrollToBottomButton = shouldShow
+        }
+    }
+
+    @ViewBuilder
+    private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(appState.appearance.accentColor)
+                .frame(width: 34, height: 34)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 3)
+        }
+        .buttonStyle(.plain)
+        .help("Scroll to bottom")
+        .accessibilityLabel("Scroll to bottom")
     }
 
     private func scheduleScrollToBottomIfNeeded(using scrollProxy: ScrollViewProxy) {
