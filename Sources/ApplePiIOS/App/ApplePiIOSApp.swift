@@ -74,6 +74,7 @@ final class MobilePiAppState: ObservableObject {
     private var catalogStreamCoalesceTask: Task<Void, Never>?
     private var pendingCatalogSessionUpdates: [PiSessionSummary] = []
     private var selectedSessionStreamTask: Task<Void, Never>?
+    private var deviceCommandRuntime: MobileDeviceCommandRuntime?
     private var selectedSessionGeneration = UUID()
     private var selectedPersistedEventIDs = Set<String>()
     private var selectedLastLine: Int?
@@ -104,6 +105,7 @@ final class MobilePiAppState: ObservableObject {
         catalogStreamTask?.cancel()
         catalogStreamCoalesceTask?.cancel()
         selectedSessionStreamTask?.cancel()
+        deviceCommandRuntime?.stop()
     }
 
     var host: PiHostConfiguration {
@@ -202,6 +204,7 @@ final class MobilePiAppState: ObservableObject {
         isAppActive = true
         await reloadCatalog()
         startCatalogStream()
+        startDeviceCommandRuntime()
         await refreshSessionDefaultsCache(quietly: true)
         if isChatVisible {
             await catchUpSelectedSession(reason: "initial load")
@@ -215,6 +218,7 @@ final class MobilePiAppState: ObservableObject {
             isAppActive = true
             guard isConfigured else { return }
             startCatalogStream()
+            startDeviceCommandRuntime()
             Task {
                 await reloadCatalog(quietly: true)
                 await refreshSessionDefaultsCache(quietly: true)
@@ -227,6 +231,7 @@ final class MobilePiAppState: ObservableObject {
             isAppActive = false
             stopSelectedSessionStream()
             stopCatalogStream()
+            stopDeviceCommandRuntime()
         @unknown default:
             break
         }
@@ -318,6 +323,21 @@ final class MobilePiAppState: ObservableObject {
         catalogStreamCoalesceTask?.cancel()
         catalogStreamCoalesceTask = nil
         pendingCatalogSessionUpdates = []
+    }
+
+    private func startDeviceCommandRuntime() {
+        guard isAppActive, isConfigured else { return }
+        if deviceCommandRuntime != nil { return }
+        let runtime = MobileDeviceCommandRuntime(host: host, token: daemonToken.nilIfBlank) { [weak self] message in
+            self?.statusMessage = message
+        }
+        deviceCommandRuntime = runtime
+        runtime.start()
+    }
+
+    private func stopDeviceCommandRuntime() {
+        deviceCommandRuntime?.stop()
+        deviceCommandRuntime = nil
     }
 
     func selectSession(_ session: PiSessionSummary) {
@@ -1402,6 +1422,8 @@ final class MobilePiAppState: ObservableObject {
         if let data = try? JSONEncoder().encode(host) {
             defaults.set(data, forKey: hostDefaultsKey)
         }
+        stopDeviceCommandRuntime()
+        startDeviceCommandRuntime()
     }
 
     private func saveToken() {
@@ -1415,6 +1437,8 @@ final class MobilePiAppState: ObservableObject {
         } catch {
             statusMessage = error.localizedDescription
         }
+        stopDeviceCommandRuntime()
+        startDeviceCommandRuntime()
     }
 }
 

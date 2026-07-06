@@ -18,6 +18,129 @@ public struct RemoteDaemonClient: Sendable {
         return "Connected. \(catalog.projects.count) projects, \(catalog.sessions.count) sessions."
     }
 
+    @discardableResult
+    public func registerDevice(
+        host: PiHostConfiguration,
+        id: String,
+        name: String,
+        platform: String,
+        capabilities: [String],
+        tokenOverride: String? = nil
+    ) async throws -> RemoteDeviceRecord {
+        try await send(
+            host: host,
+            path: "/devices",
+            method: "POST",
+            tokenOverride: tokenOverride,
+            body: RemoteDeviceRegisterRequest(id: id, name: name, platform: platform, capabilities: capabilities),
+            accept: "application/json"
+        )
+    }
+
+    public func streamDeviceJobs(
+        host: PiHostConfiguration,
+        deviceID: String,
+        tokenOverride: String? = nil
+    ) -> AsyncThrowingStream<RemoteDeviceJobRecord, Error> {
+        AsyncThrowingStream { continuation in
+            let request: URLRequest
+            do {
+                request = try makeLiveRequest(
+                    host: host,
+                    path: "/devices/\(encodedPathComponent(deviceID))/jobs/stream",
+                    tokenOverride: tokenOverride,
+                    accept: "text/event-stream"
+                )
+            } catch {
+                continuation.finish(throwing: error)
+                return
+            }
+
+            let startedAt = Date()
+            Self.logHTTPStart(request, category: "remote.device-sse")
+            let worker = Task {
+                do {
+                    let (bytes, response) = try await Self.liveSession.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw RemoteDaemonError.invalidResponse
+                    }
+                    guard (200..<300).contains(http.statusCode) else {
+                        var bodyData = Data()
+                        for try await byte in bytes { bodyData.append(byte) }
+                        let message = String(data: bodyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        throw RemoteDaemonError.requestFailed(status: http.statusCode, body: message)
+                    }
+                    RemoteDiagnostics.log(level: "info", category: "remote.device-sse", message: "Device job SSE connected", metadata: ["deviceID": deviceID])
+                    let parser = SSECatalogEventParser()
+                    let decoder = Self.makeCatalogDecoder()
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+                        guard let event = parser.feed(line) else { continue }
+                        if event.event == "error" {
+                            let message = Self.decodeSSEErrorMessage(from: event.data) ?? "Device job stream failed."
+                            throw RemoteDaemonError.requestFailed(status: 0, body: message)
+                        }
+                        guard event.event == "job",
+                              let data = event.data.data(using: .utf8),
+                              let payload = try? decoder.decode(RemoteDeviceJobStreamEvent.self, from: data) else {
+                            continue
+                        }
+                        continuation.yield(payload.job)
+                    }
+                    continuation.finish()
+                } catch {
+                    Self.logHTTPFailure(request, error: error, startedAt: startedAt, category: "remote.device-sse")
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                RemoteDiagnostics.log(level: "debug", category: "remote.device-sse", message: "Device job SSE terminated", metadata: ["deviceID": deviceID])
+                worker.cancel()
+            }
+        }
+    }
+
+    public func submitDeviceJobResult(
+        host: PiHostConfiguration,
+        jobID: String,
+        ok: Bool,
+        resultJSON: String?,
+        error: String?,
+        logs: [String],
+        tokenOverride: String? = nil
+    ) async throws -> RemoteDeviceJobRecord {
+        var object: [String: Any] = [
+            "ok": ok,
+            "logs": logs
+        ]
+        if let error, !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            object["error"] = error
+        }
+        if let resultJSON,
+           let data = resultJSON.data(using: .utf8),
+           let resultObject = try? JSONSerialization.jsonObject(with: data) {
+            object["result"] = resultObject
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        var request = try makeRequest(
+            host: host,
+            path: "/device-jobs/\(encodedPathComponent(jobID))/result",
+            method: "POST",
+            tokenOverride: tokenOverride,
+            accept: "application/json"
+        )
+        request.httpBody = data
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw RemoteDaemonError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = String(data: responseData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RemoteDaemonError.requestFailed(status: http.statusCode, body: message)
+        }
+        return try Self.makeCatalogDecoder().decode(RemoteDeviceJobRecord.self, from: responseData)
+    }
+
     /// Live subscription to the daemon's `/sessions/stream` SSE endpoint.
     /// Yields a full `PiCatalogSnapshot` every time the daemon emits a
     /// `snapshot` event. Non-snapshot events, heartbeats, and malformed
@@ -1188,6 +1311,126 @@ public enum RemoteDaemonError: LocalizedError {
         case .decodingFailed(let detail):
             return "Could not decode remote API response: \(detail)"
         }
+    }
+}
+
+public struct RemoteDeviceRecord: Codable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    public let platform: String
+    public let capabilities: [String]
+    public let registeredAt: Date
+    public let lastSeenAt: Date
+}
+
+public struct RemoteDeviceJobRecord: Codable, Hashable, Sendable {
+    public let id: String
+    public let deviceId: String
+    public let script: String
+    public let timeoutSeconds: Int?
+    public let status: String
+    public let result: String?
+    public let error: String?
+    public let logs: [String]?
+    public let createdAt: Date
+    public let startedAt: Date?
+    public let finishedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case deviceId
+        case script
+        case timeoutSeconds
+        case status
+        case result
+        case error
+        case logs
+        case createdAt
+        case startedAt
+        case finishedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        deviceId = try container.decode(String.self, forKey: .deviceId)
+        script = try container.decode(String.self, forKey: .script)
+        timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+        status = try container.decode(String.self, forKey: .status)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        logs = try container.decodeIfPresent([String].self, forKey: .logs)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        if let raw = try container.decodeIfPresent(RawJSONValue.self, forKey: .result) {
+            result = raw.jsonString
+        } else {
+            result = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(deviceId, forKey: .deviceId)
+        try container.encode(script, forKey: .script)
+        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(result, forKey: .result)
+        try container.encodeIfPresent(error, forKey: .error)
+        try container.encodeIfPresent(logs, forKey: .logs)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(startedAt, forKey: .startedAt)
+        try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+    }
+}
+
+private struct RemoteDeviceRegisterRequest: Encodable {
+    let id: String
+    let name: String
+    let platform: String
+    let capabilities: [String]
+}
+
+private struct RemoteDeviceJobStreamEvent: Decodable {
+    let type: String
+    let job: RemoteDeviceJobRecord
+}
+
+private struct RawJSONValue: Decodable {
+    let object: Any
+    let jsonString: String
+
+    init(from decoder: Decoder) throws {
+        object = try RawJSONValue.decodeObject(from: decoder)
+        if JSONSerialization.isValidJSONObject(object) {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            jsonString = String(data: data, encoding: .utf8) ?? "null"
+        } else if object is NSNull {
+            jsonString = "null"
+        } else if let string = object as? String {
+            jsonString = try String(data: JSONEncoder().encode(string), encoding: .utf8) ?? "\"\""
+        } else if let number = object as? NSNumber {
+            jsonString = number.stringValue
+        } else {
+            jsonString = "null"
+        }
+    }
+
+    private static func decodeObject(from decoder: Decoder) throws -> Any {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { return NSNull() }
+        if let value = try? container.decode(Bool.self) { return value }
+        if let value = try? container.decode(Int.self) { return value }
+        if let value = try? container.decode(Double.self) { return value }
+        if let value = try? container.decode(String.self) { return value }
+        if let value = try? container.decode([RawJSONValue].self) {
+            return value.map { raw -> Any in raw.object }
+        }
+        if let value = try? container.decode([String: RawJSONValue].self) {
+            return value.mapValues { raw -> Any in raw.object }
+        }
+        return NSNull()
     }
 }
 

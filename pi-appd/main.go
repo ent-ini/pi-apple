@@ -72,6 +72,11 @@ type server struct {
 
 	generatingMu   sync.Mutex
 	generatingByID map[string]bool
+
+	devicesMu        sync.Mutex
+	devices          map[string]deviceRecord
+	deviceJobs       map[string]*deviceJobRecord
+	deviceJobStreams map[string]map[chan deviceJobStreamEvent]struct{}
 }
 
 type activeRun struct {
@@ -312,6 +317,57 @@ type streamErrorRecord struct {
 	Error string `json:"error"`
 }
 
+type deviceRecord struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Platform     string    `json:"platform"`
+	Capabilities []string  `json:"capabilities"`
+	RegisteredAt time.Time `json:"registeredAt"`
+	LastSeenAt   time.Time `json:"lastSeenAt"`
+}
+
+type deviceRegisterRequest struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Platform     string   `json:"platform"`
+	Capabilities []string `json:"capabilities"`
+}
+
+type deviceListResponse struct {
+	Devices []deviceRecord `json:"devices"`
+}
+
+type deviceJobCreateRequest struct {
+	Script         string `json:"script"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+}
+
+type deviceJobResultRequest struct {
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+	Logs   []string        `json:"logs,omitempty"`
+}
+
+type deviceJobRecord struct {
+	ID             string          `json:"id"`
+	DeviceID       string          `json:"deviceId"`
+	Script         string          `json:"script"`
+	TimeoutSeconds int             `json:"timeoutSeconds,omitempty"`
+	Status         string          `json:"status"`
+	Result         json.RawMessage `json:"result,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	Logs           []string        `json:"logs,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	StartedAt      *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt     *time.Time      `json:"finishedAt,omitempty"`
+}
+
+type deviceJobStreamEvent struct {
+	Type string          `json:"type"`
+	Job  deviceJobRecord `json:"job"`
+}
+
 type rpcImageContent struct {
 	Type     string `json:"type"`
 	Data     string `json:"data"`
@@ -452,12 +508,15 @@ func main() {
 	piExecutable := getenvDefault("PI_APPD_PI_EXECUTABLE", "pi")
 
 	srv := &server{
-		agentDir:     expandHome(agentDir),
-		token:        token,
-		piExecutable: piExecutable,
-		sessionsByID: map[string]sessionRecord{},
-		broker:       newCatalogBroker(),
-		lineIndexes:  sharedJSONLLineIndexes,
+		agentDir:         expandHome(agentDir),
+		token:            token,
+		piExecutable:     piExecutable,
+		sessionsByID:     map[string]sessionRecord{},
+		broker:           newCatalogBroker(),
+		lineIndexes:      sharedJSONLLineIndexes,
+		devices:          map[string]deviceRecord{},
+		deviceJobs:       map[string]*deviceJobRecord{},
+		deviceJobStreams: map[string]map[chan deviceJobStreamEvent]struct{}{},
 	}
 
 	mux := http.NewServeMux()
@@ -471,6 +530,9 @@ func main() {
 	mux.HandleFunc("/file", srv.handleFile)
 	mux.HandleFunc("/uploads", srv.handleUploads)
 	mux.HandleFunc("/transcribe", srv.handleTranscribe)
+	mux.HandleFunc("/devices", srv.handleDevices)
+	mux.HandleFunc("/devices/", srv.handleDeviceSubroutes)
+	mux.HandleFunc("/device-jobs/", srv.handleDeviceJobSubroutes)
 
 	go srv.watchCatalog()
 
@@ -3603,6 +3665,284 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (s *server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/devices" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.devicesMu.Lock()
+		devices := make([]deviceRecord, 0, len(s.devices))
+		for _, device := range s.devices {
+			devices = append(devices, device)
+		}
+		s.devicesMu.Unlock()
+		sort.Slice(devices, func(i, j int) bool {
+			return devices[i].LastSeenAt.After(devices[j].LastSeenAt)
+		})
+		writeJSON(w, http.StatusOK, deviceListResponse{Devices: devices})
+	case http.MethodPost:
+		var req deviceRegisterRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "device id is required")
+			return
+		}
+		now := time.Now().UTC()
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			name = id
+		}
+		platform := strings.TrimSpace(req.Platform)
+		if platform == "" {
+			platform = "unknown"
+		}
+		capabilities := append([]string(nil), req.Capabilities...)
+		sort.Strings(capabilities)
+
+		s.devicesMu.Lock()
+		registeredAt := now
+		if existing, ok := s.devices[id]; ok {
+			registeredAt = existing.RegisteredAt
+		}
+		device := deviceRecord{
+			ID:           id,
+			Name:         name,
+			Platform:     platform,
+			Capabilities: capabilities,
+			RegisteredAt: registeredAt,
+			LastSeenAt:   now,
+		}
+		s.devices[id] = device
+		if s.deviceJobStreams[id] == nil {
+			s.deviceJobStreams[id] = map[chan deviceJobStreamEvent]struct{}{}
+		}
+		s.devicesMu.Unlock()
+		writeJSON(w, http.StatusOK, device)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *server) handleDeviceSubroutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/devices/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	deviceID := parts[0]
+	if len(parts) == 2 && parts[1] == "jobs" {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleCreateDeviceJob(w, r, deviceID)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "jobs" && parts[2] == "stream" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleDeviceJobsStream(w, r, deviceID)
+		return
+	}
+	writeError(w, http.StatusNotFound, "not found")
+}
+
+func (s *server) handleCreateDeviceJob(w http.ResponseWriter, r *http.Request, deviceID string) {
+	var req deviceJobCreateRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	script := strings.TrimSpace(req.Script)
+	if script == "" {
+		writeError(w, http.StatusBadRequest, "script is required")
+		return
+	}
+	if req.TimeoutSeconds <= 0 {
+		req.TimeoutSeconds = 30
+	}
+	if req.TimeoutSeconds > 300 {
+		req.TimeoutSeconds = 300
+	}
+
+	s.devicesMu.Lock()
+	if _, ok := s.devices[deviceID]; !ok {
+		s.devicesMu.Unlock()
+		writeError(w, http.StatusNotFound, "unknown device")
+		return
+	}
+	job := &deviceJobRecord{
+		ID:             "job-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		DeviceID:       deviceID,
+		Script:         script,
+		TimeoutSeconds: req.TimeoutSeconds,
+		Status:         "queued",
+		CreatedAt:      time.Now().UTC(),
+	}
+	s.deviceJobs[job.ID] = job
+	event := deviceJobStreamEvent{Type: "job", Job: *job}
+	for ch := range s.deviceJobStreams[deviceID] {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+	s.devicesMu.Unlock()
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *server) handleDeviceJobsStream(w http.ResponseWriter, r *http.Request, deviceID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := make(chan deviceJobStreamEvent, 16)
+	now := time.Now().UTC()
+
+	s.devicesMu.Lock()
+	device, ok := s.devices[deviceID]
+	if !ok {
+		s.devicesMu.Unlock()
+		writeTypedSSE(w, flusher, streamEvent{Type: "error", Payload: mustJSON(map[string]string{"error": "unknown device"})})
+		return
+	}
+	device.LastSeenAt = now
+	s.devices[deviceID] = device
+	if s.deviceJobStreams[deviceID] == nil {
+		s.deviceJobStreams[deviceID] = map[chan deviceJobStreamEvent]struct{}{}
+	}
+	s.deviceJobStreams[deviceID][ch] = struct{}{}
+	pending := make([]deviceJobRecord, 0)
+	for _, job := range s.deviceJobs {
+		if job.DeviceID == deviceID && job.Status == "queued" {
+			startedAt := now
+			job.Status = "running"
+			job.StartedAt = &startedAt
+			pending = append(pending, *job)
+		}
+	}
+	s.devicesMu.Unlock()
+
+	defer func() {
+		s.devicesMu.Lock()
+		delete(s.deviceJobStreams[deviceID], ch)
+		s.devicesMu.Unlock()
+		close(ch)
+	}()
+
+	for _, job := range pending {
+		if !writeTypedSSE(w, flusher, streamEvent{Type: "job", Payload: mustJSON(deviceJobStreamEvent{Type: "job", Job: job})}) {
+			return
+		}
+	}
+
+	keepAlive := time.NewTicker(25 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepAlive.C:
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case event := <-ch:
+			s.devicesMu.Lock()
+			if job := s.deviceJobs[event.Job.ID]; job != nil && job.Status == "queued" {
+				startedAt := time.Now().UTC()
+				job.Status = "running"
+				job.StartedAt = &startedAt
+				event.Job = *job
+			}
+			s.devicesMu.Unlock()
+			if !writeTypedSSE(w, flusher, streamEvent{Type: "job", Payload: mustJSON(event)}) {
+				return
+			}
+		}
+	}
+}
+
+func (s *server) handleDeviceJobSubroutes(w http.ResponseWriter, r *http.Request) {
+	jobID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/device-jobs/"), "/")
+	if jobID == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if strings.HasSuffix(jobID, "/result") {
+		jobID = strings.TrimSuffix(jobID, "/result")
+	}
+	if strings.HasSuffix(r.URL.Path, "/result") {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleDeviceJobResult(w, r, jobID)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.devicesMu.Lock()
+	job := s.deviceJobs[jobID]
+	s.devicesMu.Unlock()
+	if job == nil {
+		writeError(w, http.StatusNotFound, "unknown job")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *server) handleDeviceJobResult(w http.ResponseWriter, r *http.Request, jobID string) {
+	var req deviceJobResultRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	now := time.Now().UTC()
+	s.devicesMu.Lock()
+	job := s.deviceJobs[jobID]
+	if job == nil {
+		s.devicesMu.Unlock()
+		writeError(w, http.StatusNotFound, "unknown job")
+		return
+	}
+	job.Result = req.Result
+	job.Error = strings.TrimSpace(req.Error)
+	job.Logs = append([]string(nil), req.Logs...)
+	job.FinishedAt = &now
+	if req.OK {
+		job.Status = "succeeded"
+	} else {
+		job.Status = "failed"
+		if job.Error == "" {
+			job.Error = "device job failed"
+		}
+	}
+	if device, ok := s.devices[job.DeviceID]; ok {
+		device.LastSeenAt = now
+		s.devices[job.DeviceID] = device
+	}
+	updated := *job
+	s.devicesMu.Unlock()
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
