@@ -22,7 +22,7 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     private let deviceInfoSnapshot: [String: String]
     private var streamTask: Task<Void, Never>?
 
-    static let runtimeVersion = "device-js.v4-direct-fallback-mainactor"
+    static let runtimeVersion = "device-js.v5-direct-before-mainactor"
 
     static let capabilities = [
         runtimeVersion,
@@ -146,13 +146,22 @@ final class MobileDeviceCommandRuntime: @unchecked Sendable {
     }
 
     private func execute(job: RemoteDeviceJobRecord) async -> MobileDeviceScriptExecutionResult {
+        let timeoutSeconds = job.timeoutSeconds ?? 30
+        if let direct = MobileJavaScriptExecutor.directReturnResultIfPossible(job.script) {
+            return MobileDeviceScriptExecutionResult(
+                ok: true,
+                resultJSON: direct,
+                error: nil,
+                logs: ["timeoutSeconds=\(timeoutSeconds)", "directReturnFallback=true"]
+            )
+        }
         // JavaScriptCore on iOS should be driven from the app's main actor.
         // Jobs are trusted and short-lived, so blocking the UI briefly is an
         // acceptable MVP trade-off and avoids background-executor hangs.
-        await MainActor.run {
+        return await MainActor.run {
             MobileJavaScriptExecutor(deviceInfo: deviceInfoSnapshot).run(
                 script: job.script,
-                timeoutSeconds: job.timeoutSeconds ?? 30
+                timeoutSeconds: timeoutSeconds
             )
         }
     }
@@ -279,10 +288,6 @@ private final class MobileJavaScriptExecutor {
 
     func run(script: String, timeoutSeconds: Int) -> MobileDeviceScriptExecutionResult {
         var logs = ["timeoutSeconds=\(timeoutSeconds)"]
-        if let direct = Self.directReturnResultIfPossible(script) {
-            logs.append("directReturnFallback=true")
-            return MobileDeviceScriptExecutionResult(ok: true, resultJSON: direct, error: nil, logs: logs)
-        }
         guard let context = JSContext(virtualMachine: JSVirtualMachine()) else {
             return MobileDeviceScriptExecutionResult(ok: false, resultJSON: nil, error: "Could not create JavaScript context", logs: logs)
         }
@@ -355,7 +360,7 @@ private final class MobileJavaScriptExecutor {
         return string
     }
 
-    private static func directReturnResultIfPossible(_ script: String) -> String? {
+    static func directReturnResultIfPossible(_ script: String) -> String? {
         let trimmed = script.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("return "), trimmed.hasSuffix(";") else { return nil }
         let expression = String(trimmed.dropFirst("return ".count).dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
