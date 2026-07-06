@@ -1011,7 +1011,7 @@ private struct MobileSettingsView: View {
         }
         do {
             let decoded = try JSONDecoder().decode(MobileAppearanceColorTransfer.self, from: data)
-            appState.updateAppearance { decoded.apply(to: &$0) }
+            applyPastedAppearance(decoded)
             appearanceClipboardStatus = "Colors pasted."
         } catch {
             appearanceClipboardStatus = "Could not paste colors: \(error.localizedDescription)"
@@ -1019,6 +1019,19 @@ private struct MobileSettingsView: View {
         #else
         appearanceClipboardStatus = "Clipboard is unavailable on this platform."
         #endif
+    }
+
+    private func applyPastedAppearance(_ transfer: MobileAppearanceColorTransfer) {
+        appState.updateAppearance { transfer.apply(to: &$0) }
+        // Some visible ColorPickers can briefly write their stale binding value
+        // back during the same Form update. Re-apply on the next ticks so the
+        // pasted accent/user-message colors win reliably on iPhone.
+        DispatchQueue.main.async {
+            appState.updateAppearance { transfer.apply(to: &$0) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            appState.updateAppearance { transfer.apply(to: &$0) }
+        }
     }
 }
 
@@ -1061,8 +1074,16 @@ private struct MobileAppearanceColorTransfer: Codable {
         if let sidebarBackgroundColorValue { appearance.sidebarBackgroundColorValue = sidebarBackgroundColorValue }
         if let composerAreaBackgroundColorValue { appearance.composerAreaBackgroundColorValue = composerAreaBackgroundColorValue }
         if let textColorValue { appearance.textColorValue = textColorValue }
-        if let userMessageBackgroundColorValue { appearance.userMessageBackgroundColorValue = userMessageBackgroundColorValue }
-        if let userMessageTextColorValue { appearance.userMessageTextColorValue = userMessageTextColorValue }
+        if let userMessageBackgroundColorValue {
+            appearance.userMessageBackgroundColorValue = userMessageBackgroundColorValue
+        } else if let accentColorValue {
+            appearance.userMessageBackgroundColorValue = accentColorValue
+        }
+        if let userMessageTextColorValue {
+            appearance.userMessageTextColorValue = userMessageTextColorValue
+        } else if let accentColorValue {
+            appearance.userMessageTextColorValue = accentColorValue.readableForegroundColorValue
+        }
         if let assistantMessageBackgroundColorValue { appearance.assistantMessageBackgroundColorValue = assistantMessageBackgroundColorValue }
         if let assistantMessageTextColorValue { appearance.assistantMessageTextColorValue = assistantMessageTextColorValue }
         if let colorScheme { appearance.colorScheme = colorScheme }

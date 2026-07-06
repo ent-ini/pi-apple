@@ -331,6 +331,10 @@ struct CodableAccentColor: Codable, Equatable {
     }
 
     var readableForegroundColor: Color {
+        readableForegroundColorValue.color
+    }
+
+    var readableForegroundColorValue: CodableAccentColor {
         isDark ? .white : .black
     }
 
@@ -342,4 +346,6 @@ struct CodableAccentColor: Codable, Equatable {
     static let blue = CodableAccentColor(red: 0.42, green: 0.63, blue: 1.0)
     static let green = CodableAccentColor(red: 0.42, green: 0.82, blue: 0.55)
     static let graphite = CodableAccentColor(red: 0.66, green: 0.68, blue: 0.72)
+    static let white = CodableAccentColor(red: 1.0, green: 1.0, blue: 1.0)
+    static let black = CodableAccentColor(red: 0.0, green: 0.0, blue: 0.0)
 }

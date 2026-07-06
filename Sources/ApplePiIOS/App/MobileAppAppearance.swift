@@ -271,6 +271,10 @@ struct MobileCodableAccentColor: Codable, Equatable {
     }
 
     var readableForegroundColor: Color {
+        readableForegroundColorValue.color
+    }
+
+    var readableForegroundColorValue: MobileCodableAccentColor {
         isDark ? .white : .black
     }
 
@@ -282,4 +286,6 @@ struct MobileCodableAccentColor: Codable, Equatable {
     static let blue = MobileCodableAccentColor(red: 0.42, green: 0.63, blue: 1.0)
     static let green = MobileCodableAccentColor(red: 0.42, green: 0.82, blue: 0.55)
     static let graphite = MobileCodableAccentColor(red: 0.66, green: 0.68, blue: 0.72)
+    static let white = MobileCodableAccentColor(red: 1.0, green: 1.0, blue: 1.0)
+    static let black = MobileCodableAccentColor(red: 0.0, green: 0.0, blue: 0.0)
 }
