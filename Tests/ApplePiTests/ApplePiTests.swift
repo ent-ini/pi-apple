@@ -813,7 +813,7 @@ private func isolatedDefaults() -> UserDefaults {
     }())
 }
 
-@Test func transcriptVisibilityHidesThinkingOnlyAssistantFragments() {
+@Test func transcriptVisibilityShowsThinkingOnlyAssistantFragments() {
     let events = SessionEventParser.parse(lines: [
         #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"toolCall","id":"call-1","name":"read","arguments":{}}]}}"#,
         #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"done"},{"type":"text","text":"Готово"}]}}"#
@@ -821,13 +821,22 @@ private func isolatedDefaults() -> UserDefaults {
 
     let visible = events.filter(\.isVisibleInTranscript)
 
-    #expect(visible.count == 2)
+    #expect(visible.count == 3)
     #expect({
-        if case .toolCall = visible[0] { return true }
+        if case .message(let message, _) = visible[0] {
+            return message.content.contains {
+                if case .thinking(let text, _) = $0 { return text == "checking" }
+                return false
+            }
+        }
         return false
     }())
     #expect({
-        if case .message(let message, _) = visible[1] { return message.content.contains(.text("Готово")) }
+        if case .toolCall = visible[1] { return true }
+        return false
+    }())
+    #expect({
+        if case .message(let message, _) = visible[2] { return message.content.contains(.text("Готово")) }
         return false
     }())
 }

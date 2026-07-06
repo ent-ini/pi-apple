@@ -186,8 +186,8 @@ private extension Message {
                 return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .image:
                 return true
-            case .thinking:
-                return false
+            case .thinking(let text, _):
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         }
     }
