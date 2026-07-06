@@ -131,7 +131,7 @@ public struct RemoteDaemonClient: Sendable {
         }
         if let resultJSON,
            let data = resultJSON.data(using: .utf8),
-           let resultObject = try? JSONSerialization.jsonObject(with: data) {
+           let resultObject = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             object["result"] = resultObject
         }
         let data = try JSONSerialization.data(withJSONObject: object)
