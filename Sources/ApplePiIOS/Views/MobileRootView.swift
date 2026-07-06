@@ -260,6 +260,7 @@ private struct MobileSessionDetailView: View {
         }
         .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
         .background(appState.appearance.mainBackgroundColor(for: resolvedColorScheme).ignoresSafeArea())
+        .simultaneousGesture(dismissKeyboardDragGesture)
         .hiddenMobileNavigationBar()
         .task(id: appState.selectedSession?.id) {
             await appState.refreshSelectedRuntimeAndModels()
@@ -443,6 +444,7 @@ private struct MobileSessionDetailView: View {
                 }
             )
             .scrollContentBackground(.hidden)
+            .mobileScrollDismissesKeyboardInteractively()
             .overlay {
                 if appState.isLoadingSession && appState.selectedEvents.isEmpty {
                     ProgressView("Loading \(title)…")
@@ -544,6 +546,23 @@ private struct MobileSessionDetailView: View {
 
     private var canSendDraft: Bool {
         !appState.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty
+    }
+
+    private var dismissKeyboardDragGesture: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            .onEnded { value in
+                guard isComposerFocused,
+                      value.translation.height > 40,
+                      abs(value.translation.width) < value.translation.height else { return }
+                dismissKeyboard()
+            }
+    }
+
+    private func dismissKeyboard() {
+        isComposerFocused = false
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
 
     private var slashCommandMatches: [MobileSlashCommand] {
@@ -2263,6 +2282,15 @@ private extension View {
     func hiddenMobileNavigationBar() -> some View {
         #if os(iOS)
         toolbar(.hidden, for: .navigationBar)
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func mobileScrollDismissesKeyboardInteractively() -> some View {
+        #if os(iOS)
+        scrollDismissesKeyboard(.interactively)
         #else
         self
         #endif
