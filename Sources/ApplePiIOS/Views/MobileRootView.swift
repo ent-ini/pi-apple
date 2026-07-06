@@ -246,6 +246,12 @@ private struct MobileSessionDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .onAppear {
+            appState.setChatVisible(true)
+        }
+        .onDisappear {
+            appState.setChatVisible(false)
+        }
     }
 
     private var chatTopBar: some View {

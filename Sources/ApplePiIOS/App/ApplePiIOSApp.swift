@@ -50,6 +50,8 @@ final class MobilePiAppState: ObservableObject {
     @Published var sessionSearchText = ""
 
     static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
+    private static let maxSelectedEventsRetained = 260
+    private static let maxStoredTextCharacters = 50_000
 
     private let defaults: UserDefaults
     private let hostDefaultsKey = "ApplePiIOS.host"
@@ -62,6 +64,8 @@ final class MobilePiAppState: ObservableObject {
     private var selectedSessionGeneration = UUID()
     private var selectedPersistedEventIDs = Set<String>()
     private var selectedLastLine: Int?
+    private var isAppActive = true
+    private var isChatVisible = false
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -139,28 +143,46 @@ final class MobilePiAppState: ObservableObject {
 
     func loadInitialCatalogIfConfigured() async {
         guard isConfigured else { return }
+        isAppActive = true
         await reloadCatalog()
         startCatalogStream()
-        await catchUpSelectedSession(reason: "initial load")
-        startSelectedSessionStreamIfPossible()
+        if isChatVisible {
+            await catchUpSelectedSession(reason: "initial load")
+            startSelectedSessionStreamIfPossible()
+        }
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            isAppActive = true
             guard isConfigured else { return }
             startCatalogStream()
             Task {
                 await reloadCatalog(quietly: true)
-                await catchUpSelectedSession(reason: "foreground")
-                startSelectedSessionStreamIfPossible()
+                if self.isChatVisible {
+                    await self.catchUpSelectedSession(reason: "foreground")
+                    self.startSelectedSessionStreamIfPossible()
+                }
             }
-        case .background:
+        case .background, .inactive:
+            isAppActive = false
             stopSelectedSessionStream()
-        case .inactive:
-            break
+            stopCatalogStream()
         @unknown default:
             break
+        }
+    }
+
+    func setChatVisible(_ visible: Bool) {
+        isChatVisible = visible
+        if visible {
+            Task {
+                await catchUpSelectedSession(reason: "chat visible")
+                startSelectedSessionStreamIfPossible()
+            }
+        } else {
+            stopSelectedSessionStream()
         }
     }
 
@@ -206,7 +228,7 @@ final class MobilePiAppState: ObservableObject {
 
     func startCatalogStream() {
         catalogStreamTask?.cancel()
-        guard isConfigured else { return }
+        guard isAppActive, isConfigured else { return }
         let host = host
         let token = daemonToken.nilIfBlank
         let client = RemoteDaemonClient()
@@ -226,6 +248,11 @@ final class MobilePiAppState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func stopCatalogStream() {
+        catalogStreamTask?.cancel()
+        catalogStreamTask = nil
     }
 
     func selectSession(_ session: PiSessionSummary) async {
@@ -597,7 +624,9 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func catchUpSelectedSession(reason: String) async {
-        guard isConfigured,
+        guard isAppActive,
+              isChatVisible,
+              isConfigured,
               let sessionID = selectedSession?.id.nilIfBlank else { return }
         let after = selectedLastLine ?? -1
         do {
@@ -620,7 +649,9 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func startSelectedSessionStreamIfPossible() {
-        guard isConfigured,
+        guard isAppActive,
+              isChatVisible,
+              isConfigured,
               selectedSessionStreamTask == nil,
               let sessionID = selectedSession?.id.nilIfBlank else { return }
         let host = host
@@ -665,15 +696,16 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func replaceSelectedTranscript(with page: SessionEventsPage) {
-        selectedEvents = page.events
-        selectedPersistedEventIDs = Set(page.events.map(\.id))
+        selectedEvents = page.events.map(compactEventForMobileMemory)
+        selectedPersistedEventIDs = Set(selectedEvents.map(\.id))
         selectedLastLine = page.lastLine ?? page.events.map(\.lineIndex).max()
         sortSelectedEventsForDisplay()
     }
 
     private func mergePersistedPage(_ page: SessionEventsPage) {
         guard !page.events.isEmpty || page.lastLine != nil else { return }
-        for event in page.events {
+        for rawEvent in page.events {
+            let event = compactEventForMobileMemory(rawEvent)
             selectedPersistedEventIDs.insert(event.id)
             removeTransientEvents(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: true)
@@ -688,7 +720,8 @@ final class MobilePiAppState: ObservableObject {
 
     private func mergeTransientEvents(_ events: [SessionEvent]) {
         guard !events.isEmpty else { return }
-        for event in events {
+        for rawEvent in events {
+            let event = compactEventForMobileMemory(rawEvent)
             guard !selectedPersistedEventIDs.contains(event.id) else { continue }
             removeTransientEvents(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: false)
@@ -705,8 +738,63 @@ final class MobilePiAppState: ObservableObject {
             timestamp: Date(),
             parentId: nil
         )
-        upsertSelectedEvent(.message(message, lineIndex: Int.max), allowPersistedToWin: false)
+        upsertSelectedEvent(compactEventForMobileMemory(.message(message, lineIndex: Int.max)), allowPersistedToWin: false)
         sortSelectedEventsForDisplay()
+    }
+
+    private func compactEventForMobileMemory(_ event: SessionEvent) -> SessionEvent {
+        switch event {
+        case .message(let message, let lineIndex):
+            let compactedContent = message.content.map { block -> ContentBlock in
+                switch block {
+                case .text(let text):
+                    return .text(truncatedForMobileMemory(text, label: "message"))
+                case .thinking(let text, let signature):
+                    return .thinking(truncatedForMobileMemory(text, label: "thinking"), signature: signature)
+                case .image:
+                    return block
+                }
+            }
+            return .message(
+                Message(
+                    id: message.id,
+                    role: message.role,
+                    content: compactedContent,
+                    model: message.model,
+                    timestamp: message.timestamp,
+                    parentId: message.parentId
+                ),
+                lineIndex: lineIndex
+            )
+        case .toolCall(let call, let lineIndex):
+            return .toolCall(
+                .function(
+                    id: call.id,
+                    name: call.name,
+                    arguments: truncatedForMobileMemory(call.arguments, label: "tool call")
+                ),
+                lineIndex: lineIndex
+            )
+        case .toolResult(let result, let lineIndex):
+            return .toolResult(
+                .result(
+                    id: result.id,
+                    callId: result.callId,
+                    toolName: result.toolName,
+                    output: truncatedForMobileMemory(result.output, label: "tool result"),
+                    isError: result.isError
+                ),
+                lineIndex: lineIndex
+            )
+        case .meta, .other:
+            return event
+        }
+    }
+
+    private func truncatedForMobileMemory(_ text: String, label: String) -> String {
+        guard text.count > Self.maxStoredTextCharacters else { return text }
+        let prefix = String(text.prefix(Self.maxStoredTextCharacters))
+        return "\(prefix)\n\n… \(label) truncated on iPhone to reduce memory (\(text.count) characters total). Open the session on Mac for the full content."
     }
 
     private func upsertSelectedEvent(_ event: SessionEvent, allowPersistedToWin: Bool) {
@@ -787,6 +875,13 @@ final class MobilePiAppState: ObservableObject {
                 return lhs.offset < rhs.offset
             }
         }.map(\.element)
+        trimSelectedEventsForMobileMemoryIfNeeded()
+    }
+
+    private func trimSelectedEventsForMobileMemoryIfNeeded() {
+        guard selectedEvents.count > Self.maxSelectedEventsRetained else { return }
+        selectedEvents = Array(selectedEvents.suffix(Self.maxSelectedEventsRetained))
+        selectedPersistedEventIDs = selectedPersistedEventIDs.intersection(Set(selectedEvents.map(\.id)))
     }
 
     private static func selectableModels(from models: [PiModelOption]) -> [PiModelOption] {
