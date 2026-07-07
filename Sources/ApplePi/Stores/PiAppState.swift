@@ -1251,12 +1251,16 @@ final class PiAppState: ObservableObject {
         )
         do {
             let daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments)
+            // Remote turns must survive transient app/network loss; pi-appd persists JSONL
+            // and the UI catches up later. Keep this explicit, source-tag heuristic is fallback only.
+            let keepRunningOnDisconnect = true
             if let sessionID = session?.sessionID?.nilIfBlank {
                 try await RemoteDaemonClient().streamSend(
                     host: self.host,
                     sessionID: sessionID,
                     prompt: prompt,
                     attachments: daemonAttachments,
+                    keepRunningOnDisconnect: keepRunningOnDisconnect,
                     onEvent: { [weak self, weak session] event in
                         guard let self else { return }
                         await MainActor.run {
@@ -1273,6 +1277,7 @@ final class PiAppState: ObservableObject {
                     request: effectiveLaunchRequest,
                     prompt: prompt,
                     attachments: daemonAttachments,
+                    keepRunningOnDisconnect: keepRunningOnDisconnect,
                     onEvent: { [weak self, weak session] event in
                         guard let self else { return }
                         await MainActor.run {

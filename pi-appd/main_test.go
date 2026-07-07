@@ -73,15 +73,50 @@ func TestBoundedFileModTimeClampsFutureTimestamps(t *testing.T) {
 	}
 }
 
-func TestIsDetachedClientPromptDetectsIOSSourceTag(t *testing.T) {
-	if !isDetachedClientPrompt("[source:pi-ios-app type=text session=\"S\"]\nhello") {
-		t.Fatal("iOS source tag should detach runs from client disconnects")
+func TestIsDetachedClientPromptDetectsNativeAppSourceTags(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{
+			name:   "ios source tag with fields",
+			prompt: "[source:pi-ios-app type=text session=\"S\"]\nhello",
+			want:   true,
+		},
+		{
+			name:   "bare ios source tag",
+			prompt: "  [source:pi-ios-app]\nhello",
+			want:   true,
+		},
+		{
+			name:   "macos source tag with fields",
+			prompt: "[source:pi-macos-app type=text]\nhello",
+			want:   true,
+		},
+		{
+			name:   "bare macos source tag",
+			prompt: "  [source:pi-macos-app]\nhello",
+			want:   true,
+		},
+		{
+			name:   "unknown source tag",
+			prompt: "[source:pi-other-app type=text]\nhello",
+			want:   false,
+		},
+		{
+			name:   "lookalike source tag",
+			prompt: "[source:pi-macos-app-preview type=text]\nhello",
+			want:   false,
+		},
 	}
-	if !isDetachedClientPrompt("  [source:pi-ios-app]\nhello") {
-		t.Fatal("bare iOS source tag should detach runs from client disconnects")
-	}
-	if isDetachedClientPrompt("[source:pi-macos-app type=text]\nhello") {
-		t.Fatal("macOS source tag should keep existing disconnect semantics")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDetachedClientPrompt(tt.prompt); got != tt.want {
+				t.Fatalf("isDetachedClientPrompt() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

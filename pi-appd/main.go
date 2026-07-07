@@ -1876,9 +1876,19 @@ func textprotoMIMEHeader(values map[string]string) textproto.MIMEHeader {
 	return header
 }
 
+var detachedClientSourcePrefixes = []string{
+	"[source:pi-ios-app",
+	"[source:pi-macos-app",
+}
+
 func isDetachedClientPrompt(prompt string) bool {
 	trimmed := strings.TrimSpace(prompt)
-	return strings.HasPrefix(trimmed, "[source:pi-ios-app ") || strings.HasPrefix(trimmed, "[source:pi-ios-app]")
+	for _, prefix := range detachedClientSourcePrefixes {
+		if strings.HasPrefix(trimmed, prefix+" ") || strings.HasPrefix(trimmed, prefix+"]") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentReference) (rpcPromptCommand, error) {
