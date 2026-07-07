@@ -97,4 +97,24 @@ struct MarkdownTextTests {
         )))
         #expect(blocks[2].kind == .paragraph("After"))
     }
+
+    @Test
+    @MainActor
+    func wideTableCellsGrowForLongContent() {
+        let table = MarkdownTable(
+            header: ["Short", "Description"],
+            alignments: [.leading, .leading],
+            rows: [[
+                "A",
+                "This is a long cell that should receive enough width before SwiftUI calculates its wrapped height."
+            ]]
+        )
+
+        let widths = table.preferredColumnWidths(minWidth: 104, maxWidth: 420)
+
+        #expect(widths.count == 2)
+        #expect(widths[0] == 104)
+        #expect(widths[1] > 240)
+        #expect(widths[1] <= 420)
+    }
 }

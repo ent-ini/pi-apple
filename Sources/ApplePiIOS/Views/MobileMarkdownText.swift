@@ -104,14 +104,17 @@ struct MobileMarkdownText: View {
     }
 
     private func tableView(_ table: MobileMarkdownTable) -> some View {
-        ScrollView(.horizontal, showsIndicators: true) {
+        let columnWidths = table.preferredColumnWidths(minWidth: 104, maxWidth: 340)
+
+        return ScrollView(.horizontal, showsIndicators: true) {
             Grid(horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(0..<table.columnCount, id: \.self) { column in
                         tableCell(
                             table.header[safe: column] ?? "",
                             alignment: table.alignment(for: column),
-                            isHeader: true
+                            isHeader: true,
+                            width: columnWidths[safe: column] ?? 104
                         )
                     }
                 }
@@ -122,7 +125,8 @@ struct MobileMarkdownText: View {
                             tableCell(
                                 row[safe: column] ?? "",
                                 alignment: table.alignment(for: column),
-                                isHeader: false
+                                isHeader: false,
+                                width: columnWidths[safe: column] ?? 104
                             )
                         }
                     }
@@ -133,18 +137,21 @@ struct MobileMarkdownText: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
             )
-            .fixedSize(horizontal: true, vertical: false)
+            .fixedSize(horizontal: true, vertical: true)
         }
     }
 
-    private func tableCell(_ text: String, alignment: MobileMarkdownTable.Alignment, isHeader: Bool) -> some View {
+    private func tableCell(_ text: String, alignment: MobileMarkdownTable.Alignment, isHeader: Bool, width: CGFloat) -> some View {
         inlineMarkdownText(text.isEmpty ? " " : text)
             .font(isHeader ? .body.weight(.semibold) : .body)
+            .lineSpacing(2)
+            .lineLimit(nil)
             .multilineTextAlignment(alignment.textAlignment)
+            .frame(width: width, alignment: alignment.frameAlignment)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(minWidth: 88, maxWidth: 240, alignment: alignment.frameAlignment)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(minHeight: isHeader ? 38 : 40, alignment: alignment.frameAlignment)
             .background(isHeader ? Color.primary.opacity(0.055) : Color.clear)
             .overlay(Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 1), alignment: .trailing)
             .overlay(Rectangle().fill(Color.secondary.opacity(0.14)).frame(height: 1), alignment: .bottom)
@@ -535,6 +542,35 @@ private struct MobileMarkdownTable: Equatable, Sendable {
 
     func alignment(for column: Int) -> Alignment {
         alignments[safe: column] ?? .leading
+    }
+
+    func preferredColumnWidths(minWidth: CGFloat, maxWidth: CGFloat) -> [CGFloat] {
+        (0..<columnCount).map { column in
+            preferredColumnWidth(for: column, minWidth: minWidth, maxWidth: maxWidth)
+        }
+    }
+
+    private func preferredColumnWidth(for column: Int, minWidth: CGFloat, maxWidth: CGFloat) -> CGFloat {
+        let values = [header[safe: column] ?? ""] + rows.map { $0[safe: column] ?? "" }
+        let longestLineLength = values
+            .flatMap { $0.split(separator: "\n", omittingEmptySubsequences: false) }
+            .map(\.count)
+            .max() ?? 0
+        let longestTokenLength = values
+            .map(Self.longestTokenLength(in:))
+            .max() ?? 0
+        let lineDrivenWidth = CGFloat(min(longestLineLength, 72)) * 7.2
+        let tokenDrivenWidth = CGFloat(min(longestTokenLength, 44)) * 8.2
+        let preferredWidth = max(minWidth, lineDrivenWidth, tokenDrivenWidth)
+        return min(maxWidth, ceil(preferredWidth))
+    }
+
+    private static func longestTokenLength(in text: String) -> Int {
+        text.split { character in
+            character.isWhitespace || "/\\-–—_,.;:!?()[]{}<>".contains(character)
+        }
+        .map(\.count)
+        .max() ?? 0
     }
 }
 
