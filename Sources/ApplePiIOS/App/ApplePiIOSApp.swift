@@ -398,7 +398,7 @@ final class MobilePiAppState: ObservableObject {
         }
     }
 
-    func loadEarlierSelectedHistory(limit: Int = 120, preserveVisiblePosition: Bool = true) async {
+    func loadEarlierSelectedHistory(limit: Int = 40, preserveVisiblePosition: Bool = true) async {
         guard let selectedSession,
               hasEarlierHistory,
               !isLoadingEarlierHistory,

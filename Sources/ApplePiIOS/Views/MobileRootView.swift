@@ -341,7 +341,7 @@ private struct MobileSessionDetailView: View {
     private static let transcriptBottomReachedEpsilon: CGFloat = 3
     private static let scrollToBottomButtonMinimumDistance: CGFloat = 360
     private static let historyAutoLoadDistance: CGFloat = 280
-    private static let historyPageSize = 120
+    private static let historyPageSize = 40
     private static let stickyAutoScrollDuration: TimeInterval = 30
     private static let recentUserScrollDuration: TimeInterval = 0.9
     private static let userScrollBreakawayDistance: CGFloat = 12
