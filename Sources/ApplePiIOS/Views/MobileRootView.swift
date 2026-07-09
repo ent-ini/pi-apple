@@ -425,8 +425,6 @@ private struct MobileSessionDetailView: View {
                 cleanupAttachments(draftAttachments)
                 draftAttachments = []
             }
-        }
-        .onDisappear {
             if audioRecorder.isRecording {
                 audioRecorder.cancelRecording()
             }

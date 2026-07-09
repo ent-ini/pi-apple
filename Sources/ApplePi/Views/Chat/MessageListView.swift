@@ -450,9 +450,31 @@ private struct ChatScrollIntentObserver: NSViewRepresentable {
     }
 }
 
+private final class ChatScrollIntentMonitorBox: @unchecked Sendable {
+    private var monitor: Any?
+
+    func replace(with newMonitor: Any?) {
+        remove()
+        monitor = newMonitor
+    }
+
+    func remove() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    func removeOnMain() {
+        DispatchQueue.main.async { [self] in
+            remove()
+        }
+    }
+}
+
 private final class ChatScrollIntentView: NSView {
     var onUserScroll: (() -> Void)?
-    private var monitor: Any?
+    private let monitorBox = ChatScrollIntentMonitorBox()
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil {
@@ -469,11 +491,12 @@ private final class ChatScrollIntentView: NSView {
     private func resetMonitor() {
         removeMonitor()
         guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self, self.eventIsInsideView(event) else { return event }
             self.onUserScroll?()
             return event
         }
+        monitorBox.replace(with: monitor)
     }
 
     private func eventIsInsideView(_ event: NSEvent) -> Bool {
@@ -483,16 +506,13 @@ private final class ChatScrollIntentView: NSView {
     }
 
     private func removeMonitor() {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-            self.monitor = nil
-        }
+        monitorBox.remove()
     }
 
     deinit {
-        MainActor.assumeIsolated {
-            removeMonitor()
-        }
+        // NSView/NSResponder deinit may be called on a background thread;
+        // NSEvent.removeMonitor must run on the main thread.
+        monitorBox.removeOnMain()
     }
 }
 #else

@@ -349,7 +349,9 @@ private final class MobileJavaScriptExecutor {
         let timeout = max(1, min(timeoutSeconds, 300))
         let box = MobileJavaScriptResultBox()
         let semaphore = DispatchSemaphore(value: 0)
-        Thread.detachNewThread {
+        // Use Task.detached to avoid exhausting the OS thread limit
+        // when many JS jobs arrive in quick succession.
+        Task.detached(priority: .userInitiated) {
             let result = MobileJavaScriptExecutor(deviceInfo: deviceInfo).run(script: script, timeoutSeconds: timeout)
             box.store(result)
             semaphore.signal()

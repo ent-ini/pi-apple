@@ -30,7 +30,7 @@ package enum RemoteCurlCommandBuilder {
     /// usable base URL.
     package static func full(host: PiHostConfiguration, token: String) -> String? {
         guard let url = healthzURL(for: host) else { return nil }
-        return "curl -H \"Authorization: Bearer \(token)\" \(url.absoluteString.shellQuoted)"
+        return "curl -H \"Authorization: Bearer \(token.shellQuoted)\" \(url.absoluteString.shellQuoted)"
     }
 
     /// Whether `command` embeds a bearer token in plain text. Used

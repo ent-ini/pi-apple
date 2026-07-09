@@ -22,7 +22,15 @@ final class MobileAudioRecordingController: NSObject, ObservableObject, AVAudioR
         try session.setActive(true, options: [])
         #endif
 
-        let outputURL = try makeRecordingURL()
+        let outputURL: URL
+        do {
+            outputURL = try makeRecordingURL()
+        } catch {
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            #endif
+            throw error
+        }
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
             AVSampleRateKey: 44_100,
@@ -94,6 +102,7 @@ final class MobileAudioRecordingController: NSObject, ObservableObject, AVAudioR
     private func startMeterTimer() {
         stopMeterTimer()
         let timer = Timer(timeInterval: 0.08, target: self, selector: #selector(handleMeterTimer), userInfo: nil, repeats: true)
+        timer.tolerance = 0.02  // Allow up to 20 ms drift — reduces CPU wake-ups and saves battery
         meterTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }

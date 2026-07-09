@@ -304,7 +304,9 @@ final class MobilePiAppState: ObservableObject {
                 do {
                     for try await event in client.streamCatalogSnapshots(host: host, tokenOverride: token) {
                         guard !Task.isCancelled else { return }
-                        self?.handleCatalogStreamEvent(event)
+                        await MainActor.run { [weak self] in
+                            self?.handleCatalogStreamEvent(event)
+                        }
                     }
                     return
                 } catch {

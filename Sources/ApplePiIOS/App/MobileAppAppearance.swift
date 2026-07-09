@@ -278,8 +278,18 @@ struct MobileCodableAccentColor: Codable, Equatable {
         isDark ? .white : .black
     }
 
+    /// Linearize a single sRGB channel before computing luminance.
+    /// Per WCAG 2.x the raw (gamma-compressed) component must be
+    /// converted to linear light first.
+    private static func linearizeChannel(_ c: Double) -> Double {
+        c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
     private var relativeLuminance: Double {
-        (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+        let r = Self.linearizeChannel(red)
+        let g = Self.linearizeChannel(green)
+        let b = Self.linearizeChannel(blue)
+        return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
     }
 
     static let yellow = MobileCodableAccentColor(red: 0.98, green: 0.78, blue: 0.23)
