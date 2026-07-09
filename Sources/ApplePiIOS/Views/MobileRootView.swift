@@ -284,6 +284,14 @@ private struct MobileScrollBottomPreferenceKey: PreferenceKey {
     }
 }
 
+private struct MobileHistoryLoadRowMinYPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct MobileComposerHeightPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -320,6 +328,7 @@ private struct MobileSessionDetailView: View {
     @State private var bottomScrollWorkItems: [DispatchWorkItem] = []
     @State private var bottomScrollGeneration = 0
     @State private var recentTranscriptUserScrollUntil: Date?
+    @State private var historyLoadRowMinY: CGFloat = .greatestFiniteMagnitude
     @State private var showsScrollToBottomButton = false
 
     private static let slashCommands: [MobileSlashCommand] = [
@@ -331,6 +340,8 @@ private struct MobileSessionDetailView: View {
     private static let transcriptAutoscrollBuffer: CGFloat = 180
     private static let transcriptBottomReachedEpsilon: CGFloat = 3
     private static let scrollToBottomButtonMinimumDistance: CGFloat = 360
+    private static let historyAutoLoadDistance: CGFloat = 280
+    private static let historyPageSize = 120
     private static let stickyAutoScrollDuration: TimeInterval = 30
     private static let recentUserScrollDuration: TimeInterval = 0.9
     private static let userScrollBreakawayDistance: CGFloat = 12
@@ -525,6 +536,9 @@ private struct MobileSessionDetailView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
+                        if appState.hasEarlierHistory || appState.isLoadingEarlierHistory {
+                            historyLoadRow
+                        }
                         ForEach(rows) { row in
                             MobileEventRow(row: row)
                                 .id(row.id)
@@ -568,6 +582,10 @@ private struct MobileSessionDetailView: View {
                     transcriptBottomMaxY = maxY
                     updateTranscriptPinnedState(scrollProxy: proxy)
                 }
+                .onPreferenceChange(MobileHistoryLoadRowMinYPreferenceKey.self) { minY in
+                    historyLoadRowMinY = minY
+                    autoLoadEarlierHistoryIfUserScrolledNearTop()
+                }
                 .onAppear {
                     resetTranscriptScrollState()
                     scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: true)
@@ -583,6 +601,11 @@ private struct MobileSessionDetailView: View {
                     guard isSending else { return }
                     startStickyAutoScroll()
                     scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
+                }
+                .onChange(of: appState.historyRevision) { _, _ in
+                    if let anchorID = appState.consumePendingEarlierHistoryAnchorID() {
+                        proxy.scrollTo(anchorID, anchor: .top)
+                    }
                 }
                 .onChange(of: keyboardObserver.visibleHeight) { oldHeight, newHeight in
                     guard newHeight > oldHeight,
@@ -627,6 +650,64 @@ private struct MobileSessionDetailView: View {
         max(1, composerHeight + 18)
     }
 
+    @ViewBuilder
+    private var historyLoadRow: some View {
+        HStack {
+            Spacer()
+            if appState.isLoadingEarlierHistory {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Loading earlier messages")
+            } else {
+                Button("Load earlier messages") {
+                    loadEarlierHistoryPage(userInitiated: true)
+                }
+                .font(.caption)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Load earlier messages")
+            }
+            Spacer()
+        }
+        .frame(minHeight: 36)
+        .contentShape(Rectangle())
+        .background {
+            GeometryReader { historyProxy in
+                Color.clear.preference(
+                    key: MobileHistoryLoadRowMinYPreferenceKey.self,
+                    value: historyProxy.frame(in: .named(Self.transcriptCoordinateSpace)).minY
+                )
+            }
+        }
+        .onAppear {
+            guard hasCompletedInitialScrollPlacement,
+                  isTranscriptDetachedByUser || !isTranscriptPinnedToBottom else { return }
+            loadEarlierHistoryPage(userInitiated: true)
+        }
+        .id("mobile-history-load-row")
+    }
+
+    private func loadEarlierHistoryPage(userInitiated: Bool) {
+        guard appState.hasEarlierHistory,
+              !appState.isLoadingEarlierHistory else { return }
+        Task {
+            await appState.loadEarlierSelectedHistory(
+                limit: Self.historyPageSize,
+                preserveVisiblePosition: userInitiated
+            )
+        }
+    }
+
+    private func autoLoadEarlierHistoryIfUserScrolledNearTop() {
+        guard isRecentTranscriptUserScrollActive,
+              historyLoadRowMinY.isFinite,
+              historyLoadRowMinY >= -Self.historyAutoLoadDistance,
+              historyLoadRowMinY <= Self.historyAutoLoadDistance else {
+            return
+        }
+        loadEarlierHistoryPage(userInitiated: true)
+    }
+
     private func resetTranscriptScrollState() {
         cancelBottomScrollWorkItems()
         isTranscriptPinnedToBottom = true
@@ -635,6 +716,7 @@ private struct MobileSessionDetailView: View {
         hasCompletedInitialScrollPlacement = false
         showsScrollToBottomButton = false
         recentTranscriptUserScrollUntil = nil
+        historyLoadRowMinY = .greatestFiniteMagnitude
     }
 
     private var isStickyAutoScrollActive: Bool {
@@ -656,6 +738,7 @@ private struct MobileSessionDetailView: View {
 
     private func noteTranscriptUserScrollIntent(_ value: DragGesture.Value) {
         recentTranscriptUserScrollUntil = Date().addingTimeInterval(Self.recentUserScrollDuration)
+        autoLoadEarlierHistoryIfUserScrolledNearTop()
         guard abs(value.translation.height) > 4,
               abs(value.translation.height) > abs(value.translation.width) else { return }
         // A deliberate user drag must win over live-tail auto-scroll immediately;

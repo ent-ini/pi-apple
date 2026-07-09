@@ -39,6 +39,9 @@ final class MobilePiAppState: ObservableObject {
     @Published private(set) var statusMessage = "Configure pi-appd to begin."
     @Published private(set) var isLoadingCatalog = false
     @Published private(set) var isLoadingSession = false
+    @Published private(set) var isLoadingEarlierHistory = false
+    @Published private(set) var hasEarlierHistory = false
+    @Published private(set) var historyRevision = 0
     @Published private(set) var isSending = false
     @Published private(set) var sendingSessionIDs: Set<String> = []
     @Published private(set) var selectedRuntime: SessionRuntimeState?
@@ -52,7 +55,7 @@ final class MobilePiAppState: ObservableObject {
     @Published var sessionSearchText = ""
 
     static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
-    private static let maxSelectedEventsRetained = 260
+    private static let maxSelectedEventsRetained = 2_000
     private static let maxStoredTextCharacters = 50_000
     private static let catalogStreamCoalesceDelay: Duration = .milliseconds(250)
 
@@ -77,7 +80,9 @@ final class MobilePiAppState: ObservableObject {
     private var deviceCommandRuntime: MobileDeviceCommandRuntime?
     private var selectedSessionGeneration = UUID()
     private var selectedPersistedEventIDs = Set<String>()
+    private var selectedFirstLine: Int?
     private var selectedLastLine: Int?
+    private var pendingEarlierHistoryAnchorID: String?
     private var isAppActive = true
     private var isChatVisible = false
     private var isLoadingSessionDefaults = false
@@ -391,6 +396,43 @@ final class MobilePiAppState: ObservableObject {
             statusMessage = error.localizedDescription
             startSelectedSessionStreamIfPossible()
         }
+    }
+
+    func loadEarlierSelectedHistory(limit: Int = 120, preserveVisiblePosition: Bool = true) async {
+        guard let selectedSession,
+              hasEarlierHistory,
+              !isLoadingEarlierHistory,
+              !isLoadingSession,
+              let before = selectedFirstLine,
+              before > 0 else {
+            return
+        }
+        let generation = selectedSessionGeneration
+        let anchorID = preserveVisiblePosition ? filteredVisibleEvents.first?.id : nil
+        isLoadingEarlierHistory = true
+        defer { isLoadingEarlierHistory = false }
+        statusMessage = "Loading earlier messages…"
+        do {
+            let page = try await RemoteDaemonClient().loadSessionEventPage(
+                host: host,
+                sessionID: selectedSession.id,
+                limit: limit,
+                before: before,
+                tokenOverride: daemonToken.nilIfBlank
+            )
+            guard self.selectedSession?.id == selectedSession.id,
+                  selectedSessionGeneration == generation else { return }
+            prependEarlierHistoryPage(page, anchorEventID: anchorID)
+            statusMessage = page.events.isEmpty ? "No earlier messages." : "Loaded \(page.events.count) earlier event(s)."
+        } catch {
+            guard self.selectedSession?.id == selectedSession.id else { return }
+            statusMessage = "Could not load earlier messages: \(error.localizedDescription)"
+        }
+    }
+
+    func consumePendingEarlierHistoryAnchorID() -> String? {
+        defer { pendingEarlierHistoryAnchorID = nil }
+        return pendingEarlierHistoryAnchorID
     }
 
     func refreshSelectedRuntimeAndModels() async {
@@ -981,31 +1023,80 @@ final class MobilePiAppState: ObservableObject {
     private func resetSelectedTranscript() {
         selectedEvents = []
         selectedPersistedEventIDs = []
+        selectedFirstLine = nil
         selectedLastLine = nil
+        hasEarlierHistory = false
+        isLoadingEarlierHistory = false
+        pendingEarlierHistoryAnchorID = nil
         selectedSessionGeneration = UUID()
     }
 
     private func replaceSelectedTranscript(with page: SessionEventsPage) {
         selectedEvents = page.events.map(compactEventForMobileMemory)
         selectedPersistedEventIDs = Set(selectedEvents.map(\.id))
+        selectedFirstLine = page.firstLine ?? page.events.map(\.lineIndex).min()
         selectedLastLine = page.lastLine ?? page.events.map(\.lineIndex).max()
+        hasEarlierHistory = page.hasMoreBefore && ((selectedFirstLine ?? 0) > 0)
         sortSelectedEventsForDisplay()
     }
 
     private func mergePersistedPage(_ page: SessionEventsPage) {
-        guard !page.events.isEmpty || page.lastLine != nil else { return }
+        guard !page.events.isEmpty || page.lastLine != nil || page.firstLine != nil else { return }
+        let previousFirstLine = selectedFirstLine
         for rawEvent in page.events {
             let event = compactEventForMobileMemory(rawEvent)
             selectedPersistedEventIDs.insert(event.id)
             removeTransientEvents(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: true)
         }
+        if let firstLine = page.firstLine {
+            selectedFirstLine = min(selectedFirstLine ?? firstLine, firstLine)
+        } else if let eventFirstLine = page.events.map(\.lineIndex).min() {
+            selectedFirstLine = min(selectedFirstLine ?? eventFirstLine, eventFirstLine)
+        }
         if let lastLine = page.lastLine {
             selectedLastLine = max(selectedLastLine ?? lastLine, lastLine)
         } else if let eventLastLine = page.events.map(\.lineIndex).max() {
             selectedLastLine = max(selectedLastLine ?? eventLastLine, eventLastLine)
         }
+        if page.hasMoreBefore {
+            let pageStartsBeforeVisibleWindow = previousFirstLine.map { previousFirstLine in
+                page.firstLine.map { $0 <= previousFirstLine } ?? false
+            } ?? true
+            if pageStartsBeforeVisibleWindow {
+                hasEarlierHistory = (selectedFirstLine ?? 0) > 0
+            }
+        }
         sortSelectedEventsForDisplay()
+    }
+
+    private func prependEarlierHistoryPage(_ page: SessionEventsPage, anchorEventID: String?) {
+        let previousFirstLine = selectedFirstLine
+        guard !page.events.isEmpty else {
+            hasEarlierHistory = page.hasMoreBefore && ((previousFirstLine ?? 0) > 0)
+            return
+        }
+        pendingEarlierHistoryAnchorID = anchorEventID
+        for rawEvent in page.events {
+            let event = compactEventForMobileMemory(rawEvent)
+            guard !selectedPersistedEventIDs.contains(event.id) else { continue }
+            selectedPersistedEventIDs.insert(event.id)
+            removeTransientEvents(matchingPersisted: event)
+            upsertSelectedEvent(event, allowPersistedToWin: true)
+        }
+        if let firstLine = page.firstLine {
+            selectedFirstLine = min(selectedFirstLine ?? firstLine, firstLine)
+        } else if let eventFirstLine = page.events.map(\.lineIndex).min() {
+            selectedFirstLine = min(selectedFirstLine ?? eventFirstLine, eventFirstLine)
+        }
+        if let lastLine = page.lastLine {
+            selectedLastLine = max(selectedLastLine ?? lastLine, lastLine)
+        } else if let eventLastLine = page.events.map(\.lineIndex).max() {
+            selectedLastLine = max(selectedLastLine ?? eventLastLine, eventLastLine)
+        }
+        hasEarlierHistory = page.hasMoreBefore && ((selectedFirstLine ?? 0) > 0)
+        sortSelectedEventsForDisplay()
+        historyRevision &+= 1
     }
 
     private func mergeTransientEvents(_ events: [SessionEvent]) {

@@ -152,7 +152,7 @@ struct MessageListView: View {
     private static let stickyAutoScrollDuration: TimeInterval = 30
     private static let recentUserScrollDuration: TimeInterval = 0.9
     private static let userScrollBreakawayDistance: CGFloat = 12
-    private static let historyPageSize = 40
+    private static let historyPageSize = 120
     private static let scrollSettleDelays: [TimeInterval] = [0.0, 0.08, 0.22]
     private static let ensureVisibleSettleDelays: [TimeInterval] = [0.04, 0.16, 0.34, 0.65]
 
@@ -221,6 +221,11 @@ struct MessageListView: View {
                     value: historyProxy.frame(in: .named(Self.scrollCoordinateSpaceName)).minY
                 )
             }
+        }
+        .onAppear {
+            guard hasCompletedInitialPlacement,
+                  !isAnchoredToBottom else { return }
+            loadEarlierHistoryPage(userInitiated: true)
         }
         .id("history-load-\(session.firstPersistedLineIndex)")
     }
