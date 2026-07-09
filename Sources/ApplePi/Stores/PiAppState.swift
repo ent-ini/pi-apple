@@ -945,7 +945,13 @@ final class PiAppState: ObservableObject {
     }
 
     func cancelSend(in session: ChatSession) {
-        guard session.hasActiveSend else { return }
+        let hasLocalActiveSend = session.hasActiveSend
+        let hasRemoteActiveRun = isRemoteSessionGenerating(session)
+        guard hasLocalActiveSend || hasRemoteActiveRun || session.sessionID?.nilIfBlank != nil else {
+            statusMessage = "No active Pi run to abort."
+            return
+        }
+
         statusMessage = "Aborting Pi..."
         let aliases = sessionAliases(for: session)
         setSessionSending(false, aliases: aliases)
@@ -959,11 +965,24 @@ final class PiAppState: ObservableObject {
         // Important: do not cancel the send task / HTTP stream here. Abort
         // is an RPC command inside the active run; keeping the stream open
         // lets the app retain every message/tool event emitted before the
-        // abort acknowledgement, matching TUI behavior.
-        session.abortSend()
+        // abort acknowledgement, matching TUI behavior. When the app has
+        // reconnected to a backend-owned active run (no local sendTask), still
+        // send the abort RPC instead of dropping the slash command locally.
+        if hasLocalActiveSend || hasRemoteActiveRun {
+            session.abortSend()
+        }
         Task { [weak self, weak session] in
             do {
                 try await RemoteDaemonClient().abortSession(host: remoteAPIHost, sessionID: sessionID)
+                await MainActor.run {
+                    guard let self, self.host == remoteAPIHost else { return }
+                    self.statusMessage = "Abort requested."
+                    if let session, !hasLocalActiveSend {
+                        session.loadFromDisk(force: true)
+                        self.refreshSessionRuntime(for: session, updatesStatus: false)
+                    }
+                    self.scheduleCatalogRefresh(after: .milliseconds(100))
+                }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
@@ -971,6 +990,14 @@ final class PiAppState: ObservableObject {
                     session?.applyStreamingEvents([.other(type: "abort_error", lineIndex: (session?.lastPersistedLineIndex ?? 0) + 1)], isFinal: false)
                 }
             }
+        }
+    }
+
+    private func isRemoteSessionGenerating(_ session: ChatSession) -> Bool {
+        let aliases = Set(sessionAliases(for: session))
+        guard !aliases.isEmpty else { return false }
+        return sessions.contains { summary in
+            summary.isGenerating && !aliases.isDisjoint(with: Set(sessionAliases(for: summary)))
         }
     }
 

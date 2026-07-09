@@ -866,10 +866,10 @@ private struct MobileSessionDetailView: View {
     }
 
     private var slashCommandMatches: [MobileSlashCommand] {
-        let text = appState.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.hasPrefix("/") else { return [] }
+        guard let query = mobileSlashCommandQuery(in: appState.draft) else { return [] }
         return Self.slashCommands.filter { command in
-            command.name.hasPrefix(text) || text == "/"
+            let bareName = String(command.name.dropFirst())
+            return query.isEmpty || bareName.hasPrefix(query) || command.name.hasPrefix("/\(query)")
         }
     }
 
@@ -913,18 +913,16 @@ private struct MobileSessionDetailView: View {
 
     private func handleComposerSubmit() {
         let prompt = appState.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch prompt {
-        case "/abort":
-            handleAbortCommand()
-        case "/compact":
-            handleCompactCommand(instructions: "")
-        default:
-            if prompt.hasPrefix("/compact ") {
-                handleCompactCommand(instructions: String(prompt.dropFirst("/compact ".count)))
-            } else {
-                sendDraftToPi()
+        if let slashCommand = parseMobileSlashCommand(prompt) {
+            switch slashCommand {
+            case .abort:
+                handleAbortCommand()
+            case .compact(let instructions):
+                handleCompactCommand(instructions: instructions)
             }
+            return
         }
+        sendDraftToPi()
     }
 
     private func sendDraftToPi() {
@@ -2518,6 +2516,37 @@ private struct MobileIconButton: View {
 
     private var resolvedColorScheme: ColorScheme {
         appState.appearance.resolvedColorScheme(current: colorScheme)
+    }
+}
+
+private enum ParsedMobileSlashCommand: Equatable {
+    case abort
+    case compact(instructions: String)
+}
+
+private func mobileSlashCommandQuery(in text: String) -> String? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return nil }
+    let rest = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rest.isEmpty else { return "" }
+    let commandPart = rest.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+    return commandPart.lowercased()
+}
+
+private func parseMobileSlashCommand(_ text: String) -> ParsedMobileSlashCommand? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return nil }
+    let rest = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+    let parts = rest.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+    guard let command = parts.first?.lowercased() else { return nil }
+    let arguments = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+    switch command {
+    case "abort":
+        return .abort
+    case "compact":
+        return .compact(instructions: arguments)
+    default:
+        return nil
     }
 }
 

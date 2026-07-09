@@ -53,10 +53,10 @@ struct ChatSessionView: View {
     }
 
     private var slashCommandMatches: [SlashCommand] {
-        let text = session.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.hasPrefix("/") else { return [] }
+        guard let query = slashCommandQuery(in: session.draftText) else { return [] }
         return Self.slashCommands.filter { command in
-            command.name.hasPrefix(text) || text == "/"
+            let bareName = String(command.name.dropFirst())
+            return query.isEmpty || bareName.hasPrefix(query) || command.name.hasPrefix("/\(query)")
         }
     }
 
@@ -444,18 +444,16 @@ struct ChatSessionView: View {
 
     private func handleComposerSubmit() {
         let prompt = session.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch prompt {
-        case "/abort":
-            handleAbortCommand()
-        case "/compact":
-            handleCompactCommand(instructions: "")
-        default:
-            if prompt.hasPrefix("/compact ") {
-                handleCompactCommand(instructions: String(prompt.dropFirst("/compact ".count)))
-            } else {
-                handleSendTapped()
+        if let slashCommand = parseSlashCommand(prompt) {
+            switch slashCommand {
+            case .abort:
+                handleAbortCommand()
+            case .compact(let instructions):
+                handleCompactCommand(instructions: instructions)
             }
+            return
         }
+        handleSendTapped()
     }
 
     private func handleSendTapped() {
@@ -473,10 +471,6 @@ struct ChatSessionView: View {
     }
 
     private func handleAbortCommand() {
-        guard session.hasActiveSend else {
-            appState.statusMessage = "No active Pi run to abort."
-            return
-        }
         appState.cancelSend(in: session)
         clearComposer()
     }
@@ -682,6 +676,37 @@ private struct ModelGroup: Identifiable {
     let models: [PiModelOption]
 
     var id: String { provider }
+}
+
+private enum ParsedSlashCommand: Equatable {
+    case abort
+    case compact(instructions: String)
+}
+
+private func slashCommandQuery(in text: String) -> String? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return nil }
+    let rest = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rest.isEmpty else { return "" }
+    let commandPart = rest.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+    return commandPart.lowercased()
+}
+
+private func parseSlashCommand(_ text: String) -> ParsedSlashCommand? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return nil }
+    let rest = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+    let parts = rest.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+    guard let command = parts.first?.lowercased() else { return nil }
+    let arguments = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+    switch command {
+    case "abort":
+        return .abort
+    case "compact":
+        return .compact(instructions: arguments)
+    default:
+        return nil
+    }
 }
 
 private struct SlashCommand: Identifiable, Hashable {
