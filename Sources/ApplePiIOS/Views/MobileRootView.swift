@@ -603,6 +603,10 @@ private struct MobileSessionDetailView: View {
                     scrollToBottomSettled(proxy: proxy, animated: false, completesInitialPlacement: !hasCompletedInitialScrollPlacement)
                 }
                 .onChange(of: appState.historyRevision) { _, _ in
+                    stickyAutoScrollUntil = nil
+                    isTranscriptPinnedToBottom = false
+                    isTranscriptDetachedByUser = true
+                    cancelBottomScrollWorkItems()
                     if let anchorID = appState.consumePendingEarlierHistoryAnchorID() {
                         proxy.scrollTo(anchorID, anchor: .top)
                     }
@@ -659,13 +663,9 @@ private struct MobileSessionDetailView: View {
                     .controlSize(.small)
                     .accessibilityLabel("Loading earlier messages")
             } else {
-                Button("Load earlier messages") {
-                    loadEarlierHistoryPage(userInitiated: true)
-                }
-                .font(.caption)
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Load earlier messages")
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityHidden(true)
             }
             Spacer()
         }
@@ -690,6 +690,10 @@ private struct MobileSessionDetailView: View {
     private func loadEarlierHistoryPage(userInitiated: Bool) {
         guard appState.hasEarlierHistory,
               !appState.isLoadingEarlierHistory else { return }
+        stickyAutoScrollUntil = nil
+        isTranscriptPinnedToBottom = false
+        isTranscriptDetachedByUser = true
+        cancelBottomScrollWorkItems()
         Task {
             await appState.loadEarlierSelectedHistory(
                 limit: Self.historyPageSize,

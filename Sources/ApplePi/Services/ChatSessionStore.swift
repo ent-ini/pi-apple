@@ -508,7 +508,7 @@ final class ChatSession: ObservableObject, Identifiable {
             return
         }
 
-        let anchorEventID = preserveVisiblePosition ? persistedEvents.first?.id : nil
+        let anchorEventID = preserveVisiblePosition ? persistedEvents.first(where: \.isVisibleInTranscript)?.id : nil
         logHistoryStateChange("Loading earlier history", extra: ["before": String(before), "limit": String(limit), "preserveVisiblePosition": String(preserveVisiblePosition)])
         isLoadingEarlierHistory = true
         loadError = nil

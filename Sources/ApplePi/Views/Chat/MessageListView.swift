@@ -86,6 +86,9 @@ struct MessageListView: View {
                     scheduleScrollToBottomIfNeeded(using: scrollProxy)
                 }
                 .onChange(of: session.historyRevision) { _, _ in
+                    stickyAutoScrollUntil = nil
+                    isAnchoredToBottom = false
+                    cancelBottomScrollWorkItems()
                     refreshDisplayedRowsCache()
                     if let anchorID = session.consumePendingHistoryAnchorID() {
                         scrollProxy.scrollTo(anchorID, anchor: .top)
@@ -203,12 +206,9 @@ struct MessageListView: View {
                     .controlSize(.small)
                     .accessibilityLabel("Loading earlier messages")
             } else {
-                Button("Load earlier messages") {
-                    loadEarlierHistoryPage()
-                }
-                .font(.caption)
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityHidden(true)
             }
             Spacer()
         }
@@ -239,6 +239,9 @@ struct MessageListView: View {
               !session.isLoadingEarlierHistory else {
             return
         }
+        stickyAutoScrollUntil = nil
+        isAnchoredToBottom = false
+        cancelBottomScrollWorkItems()
         session.loadEarlierHistory(limit: Self.historyPageSize, preserveVisiblePosition: userInitiated)
     }
 
@@ -339,6 +342,9 @@ struct MessageListView: View {
 
     private func noteUserScrollIntent() {
         recentUserScrollUntil = Date().addingTimeInterval(Self.recentUserScrollDuration)
+        stickyAutoScrollUntil = nil
+        isAnchoredToBottom = false
+        cancelBottomScrollWorkItems()
         autoLoadEarlierHistoryIfUserScrolledNearTop()
     }
 
