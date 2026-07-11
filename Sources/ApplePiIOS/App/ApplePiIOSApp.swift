@@ -54,7 +54,7 @@ final class MobilePiAppState: ObservableObject {
     @Published var draft = ""
     @Published var sessionSearchText = ""
 
-    static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
+    static let thinkingLevels = PiModelOption.fallbackThinkingLevels
     private static let maxSelectedEventsRetained = 2_000
     private static let maxStoredTextCharacters = 50_000
     private static let catalogStreamCoalesceDelay: Duration = .milliseconds(250)
@@ -147,6 +147,16 @@ final class MobilePiAppState: ObservableObject {
 
     var selectedThinkingLevel: String {
         selectedRuntime?.thinkingLevel ?? "off"
+    }
+
+    var selectedThinkingLevels: [String] {
+        thinkingLevels(provider: selectedRuntime?.provider, modelID: selectedRuntime?.modelID)
+    }
+
+    var defaultThinkingLevels: [String] {
+        let provider = defaultModelPreference?.provider ?? defaultRuntimeForDisplay?.provider
+        let modelID = defaultModelPreference?.modelID ?? defaultRuntimeForDisplay?.modelID
+        return cachedSelectableAvailableModels.first { $0.provider == provider && $0.modelID == modelID }?.thinkingLevels ?? Self.thinkingLevels
     }
 
     var selectedContextUsageDisplayName: String {
@@ -459,11 +469,10 @@ final class MobilePiAppState: ObservableObject {
             )
             let (loadedRuntime, loadedModels) = try await (runtime, models)
             guard selectedSession?.id == sessionID else { return }
-            selectedRuntime = loadedRuntime
             availableModels = Self.selectableModels(from: loadedModels)
-            if !loadedModels.isEmpty {
-                cacheAvailableModels(Self.selectableModels(from: loadedModels))
-            }
+            selectedRuntime = runtimeApplyingKnownModelContext(loadedRuntime)
+            // `/sessions/:id/models` is cwd-scoped. Do not let it overwrite
+            // the process-wide default-model catalog used by other sessions.
         } catch {
             guard selectedSession?.id == sessionID else { return }
             statusMessage = "Could not load runtime: \(error.localizedDescription)"
@@ -481,7 +490,7 @@ final class MobilePiAppState: ObservableObject {
                 tokenOverride: daemonToken.nilIfBlank
             )
             guard selectedSession?.id == sessionID else { return }
-            selectedRuntime = runtime
+            selectedRuntime = runtimeApplyingKnownModelContext(runtime)
             await reloadCatalog(quietly: true)
         } catch {
             statusMessage = error.localizedDescription
@@ -498,7 +507,7 @@ final class MobilePiAppState: ObservableObject {
                 tokenOverride: daemonToken.nilIfBlank
             )
             guard selectedSession?.id == sessionID else { return }
-            selectedRuntime = runtime
+            selectedRuntime = runtimeApplyingKnownModelContext(runtime)
             await reloadCatalog(quietly: true)
         } catch {
             statusMessage = error.localizedDescription
@@ -788,7 +797,7 @@ final class MobilePiAppState: ObservableObject {
             removeSession(id: sessionId)
         case .runtimeChanged(let sessionId, let runtime):
             if selectedSession?.id == sessionId {
-                selectedRuntime = runtime
+                selectedRuntime = runtimeApplyingKnownModelContext(runtime)
             }
         case .unknown:
             break
@@ -1311,16 +1320,54 @@ final class MobilePiAppState: ObservableObject {
         let matchingModel = cachedSelectableAvailableModels.first { model in
             model.provider == provider && model.modelID == modelID
         }
-        return SessionRuntimeState(
-            sessionID: runtime.sessionID,
-            sessionPath: runtime.sessionPath,
+        return runtimeWith(
+            runtime,
             provider: provider,
             modelID: modelID,
             modelName: matchingModel?.name ?? runtime.modelName,
             thinkingLevel: thinkingLevel,
-            tokens: runtime.tokens,
-            contextUsage: Self.contextUsage(runtime.contextUsage, applyingContextWindow: matchingModel?.contextWindow, tokens: runtime.tokens)
+            contextWindow: matchingModel?.contextWindow
         )
+    }
+
+    private func runtimeApplyingKnownModelContext(_ runtime: SessionRuntimeState) -> SessionRuntimeState {
+        let models = availableModels.isEmpty ? cachedSelectableAvailableModels : availableModels
+        let matchingModel = models.first { model in
+            model.provider == runtime.provider && model.modelID == runtime.modelID
+        }
+        return runtimeWith(
+            runtime,
+            provider: runtime.provider,
+            modelID: runtime.modelID,
+            modelName: matchingModel?.name ?? runtime.modelName,
+            thinkingLevel: runtime.thinkingLevel,
+            contextWindow: matchingModel?.contextWindow
+        )
+    }
+
+    private func runtimeWith(
+        _ runtime: SessionRuntimeState,
+        provider: String?,
+        modelID: String?,
+        modelName: String?,
+        thinkingLevel: String,
+        contextWindow: Int?
+    ) -> SessionRuntimeState {
+        SessionRuntimeState(
+            sessionID: runtime.sessionID,
+            sessionPath: runtime.sessionPath,
+            provider: provider,
+            modelID: modelID,
+            modelName: modelName,
+            thinkingLevel: thinkingLevel,
+            tokens: runtime.tokens,
+            contextUsage: Self.contextUsage(runtime.contextUsage, applyingContextWindow: contextWindow, tokens: runtime.tokens)
+        )
+    }
+
+    private func thinkingLevels(provider: String?, modelID: String?) -> [String] {
+        let models = availableModels.isEmpty ? cachedSelectableAvailableModels : availableModels
+        return models.first { $0.provider == provider && $0.modelID == modelID }?.thinkingLevels ?? Self.thinkingLevels
     }
 
     private static func contextUsage(

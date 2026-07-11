@@ -1611,6 +1611,13 @@ final class PiAppState: ObservableObject {
     }
 
     func refreshAvailableModels(for session: ChatSession, force: Bool = false) {
+        // A persisted session can load project-specific Pi extensions/providers.
+        // Never satisfy that catalog from the process-wide default catalog.
+        if session.sessionID != nil {
+            if !force, !session.availableModels.isEmpty { return }
+            refreshAvailableModelsCache(force: true, targetSession: session)
+            return
+        }
         if !force, !session.availableModels.isEmpty { return }
         if applyCachedAvailableModels(to: session) { return }
         refreshAvailableModelsCache(force: force, targetSession: session)
@@ -1621,23 +1628,31 @@ final class PiAppState: ObservableObject {
     }
 
     private func refreshAvailableModelsCache(force: Bool, targetSession: ChatSession?) {
-        if !force, !availableModelsCache.isEmpty { return }
+        let isSessionScoped = targetSession?.sessionID != nil
+        if !isSessionScoped, !force, !availableModelsCache.isEmpty { return }
         if isLoadingAvailableModels { return }
 
         isLoadingAvailableModels = true
         let remoteAPIHost = host
         Task { [weak self, weak targetSession] in
             do {
-                let models = try await RemoteDaemonClient().loadAvailableModels(host: remoteAPIHost)
+                let models = try await RemoteDaemonClient().loadAvailableModels(
+                    host: remoteAPIHost,
+                    sessionID: targetSession?.sessionID
+                )
                 await MainActor.run {
                     guard let self, self.host == remoteAPIHost else { return }
-                    self.cacheAvailableModels(models)
                     self.isLoadingAvailableModels = false
-                    for tab in self.chatWorkspace.tabs where tab.availableModels.isEmpty {
-                        tab.updateAvailableModels(models)
-                    }
-                    if let targetSession {
+                    if let targetSession, targetSession.sessionID != nil {
+                        // `/sessions/:id/models` is cwd-scoped. It must not leak
+                        // into tabs/defaults for a different project.
                         targetSession.updateAvailableModels(models)
+                    } else {
+                        self.cacheAvailableModels(models)
+                        for tab in self.chatWorkspace.tabs where tab.availableModels.isEmpty {
+                            tab.updateAvailableModels(models)
+                        }
+                        targetSession?.updateAvailableModels(models)
                     }
                 }
             } catch {
@@ -1713,8 +1728,9 @@ final class PiAppState: ObservableObject {
     }
 
     func cycleThinkingLevel(in session: ChatSession) {
+        let availableThinkingLevels = thinkingLevels(for: session)
         if session.sessionID == nil {
-            let nextLevel = nextThinkingLevel(after: session.runtimeState?.thinkingLevel ?? "off")
+            let nextLevel = nextThinkingLevel(after: session.runtimeState?.thinkingLevel ?? "off", levels: availableThinkingLevels)
             if var request = session.launchRequest {
                 request.initialThinkingLevel = nextLevel
                 request.hasExplicitInitialThinkingLevel = true
@@ -1743,8 +1759,33 @@ final class PiAppState: ObservableObject {
             return
         }
 
+        // Resolve capabilities in this session's cwd right before cycling. A
+        // global catalog can be wrong when a project supplies Pi extensions.
+        statusMessage = "Loading thinking capabilities..."
+        let remoteAPIHost = host
+        Task { [weak self, weak session] in
+            do {
+                let models = try await RemoteDaemonClient().loadAvailableModels(
+                    host: remoteAPIHost,
+                    sessionID: sessionID
+                )
+                await MainActor.run {
+                    guard let self, let session, self.host == remoteAPIHost else { return }
+                    session.updateAvailableModels(models)
+                    self.applyPersistedThinkingCycle(in: session, sessionID: sessionID, levels: self.thinkingLevels(for: session))
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.statusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func applyPersistedThinkingCycle(in session: ChatSession, sessionID: String, levels: [String]) {
         let currentLevel = effectiveThinkingLevel(for: session)
-        let nextLevel = nextThinkingLevel(after: currentLevel)
+        let nextLevel = nextThinkingLevel(after: currentLevel, levels: levels)
         let sessionKey = runtimeSessionKey(for: session)
         let mutationVersion = nextThinkingLevelMutationVersion(for: sessionKey)
         pendingThinkingLevelBySessionKey[sessionKey] = nextLevel
@@ -1777,7 +1818,7 @@ final class PiAppState: ObservableObject {
                     guard let self, let session, self.host == remoteAPIHost else { return }
                     guard self.thinkingLevelMutationVersionBySessionKey[sessionKey] == mutationVersion else { return }
                     self.pendingThinkingLevelBySessionKey.removeValue(forKey: sessionKey)
-                    session.updateRuntimeState(runtime)
+                    session.updateRuntimeState(self.runtimeApplyingKnownModelContext(runtime))
                     self.statusMessage = "Thinking: \(runtime.thinkingLevel)"
                 }
             } catch {
@@ -1792,14 +1833,22 @@ final class PiAppState: ObservableObject {
         }
     }
 
-    static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
+    static let thinkingLevels = PiModelOption.fallbackThinkingLevels
 
-    private func nextThinkingLevel(after currentLevel: String) -> String {
+    private func thinkingLevels(for session: ChatSession) -> [String] {
+        let provider = session.runtimeState?.provider?.nilIfBlank ?? session.launchRequest?.initialModelProvider?.nilIfBlank
+        let modelID = session.runtimeState?.modelID?.nilIfBlank ?? session.launchRequest?.initialModelID?.nilIfBlank
+        guard let provider, let modelID else { return Self.thinkingLevels }
+        let models = session.availableModels.isEmpty ? availableModelsCache : session.availableModels
+        return models.first(where: { $0.provider == provider && $0.modelID == modelID })?.thinkingLevels ?? Self.thinkingLevels
+    }
+
+    private func nextThinkingLevel(after currentLevel: String, levels: [String]) -> String {
         let normalized = currentLevel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard let index = Self.thinkingLevels.firstIndex(of: normalized) else {
-            return "off"
+        guard let index = levels.firstIndex(of: normalized) else {
+            return levels.first ?? "off"
         }
-        return Self.thinkingLevels[(index + 1) % Self.thinkingLevels.count]
+        return levels[(index + 1) % levels.count]
     }
 
     private func effectiveThinkingLevel(for session: ChatSession) -> String {

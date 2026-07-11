@@ -764,7 +764,7 @@ func TestResolveAttachmentPathsRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultRuntimeFastIncludesEmptyContextUsage(t *testing.T) {
+func TestLoadDefaultRuntimeFastDoesNotInventContextWindow(t *testing.T) {
 	agentDir := t.TempDir()
 	settings := `{"defaultProvider":"opencode-go","defaultModel":"minimax-m3","defaultThinkingLevel":"off"}`
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(settings), 0o600); err != nil {
@@ -772,19 +772,73 @@ func TestLoadDefaultRuntimeFastIncludesEmptyContextUsage(t *testing.T) {
 	}
 
 	payload := (&server{agentDir: agentDir}).loadDefaultRuntimeFast(t.TempDir())
-	if payload.Runtime.ContextUsage == nil {
-		t.Fatal("ContextUsage is nil")
+	if payload.Runtime.Model == nil || payload.Runtime.Model.ID != "minimax-m3" {
+		t.Fatalf("Model = %#v, want minimax-m3", payload.Runtime.Model)
 	}
-	if payload.Runtime.ContextUsage.Tokens == nil || *payload.Runtime.ContextUsage.Tokens != 0 {
-		t.Fatalf("ContextUsage.Tokens = %#v, want 0", payload.Runtime.ContextUsage.Tokens)
-	}
-	if payload.Runtime.ContextUsage.ContextWindow != 512000 {
-		t.Fatalf("ContextWindow = %d, want 512000", payload.Runtime.ContextUsage.ContextWindow)
-	}
-	if payload.Runtime.ContextUsage.Percent == nil || *payload.Runtime.ContextUsage.Percent != 0 {
-		t.Fatalf("Percent = %#v, want 0", payload.Runtime.ContextUsage.Percent)
+	if payload.Runtime.ContextUsage != nil {
+		t.Fatalf("ContextUsage = %#v, want nil until the live Pi catalog enriches it", payload.Runtime.ContextUsage)
 	}
 }
+
+func TestNormalizeModelsPreservesTerraCapabilities(t *testing.T) {
+	models := normalizeModels([]rpcModelRecord{{
+		ID:            "gpt-5.6-terra",
+		Provider:      "openai-codex",
+		Reasoning:     true,
+		ContextWindow: 372000,
+		ThinkingLevelMap: map[string]*string{
+			"minimal": stringPointer("low"),
+			"xhigh":   stringPointer("xhigh"),
+			"max":     stringPointer("max"),
+		},
+	}})
+	want := []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+	if !reflect.DeepEqual(models[0].SupportedThinkingLevels, want) {
+		t.Fatalf("SupportedThinkingLevels = %#v, want %#v", models[0].SupportedThinkingLevels, want)
+	}
+}
+
+func TestEnrichRuntimeFromModelsUsesTerraContextInsteadOfZero(t *testing.T) {
+	server := &server{}
+	tokens := 12_000
+	runtime := sessionRuntimeResponse{
+		Model:  &rpcModelRecord{ID: "gpt-5.6-terra", Provider: "openai-codex"},
+		Tokens: runtimeTokens{Total: tokens},
+		ContextUsage: &runtimeContextUsage{
+			Tokens: &tokens,
+		},
+	}
+	enriched := server.enrichRuntimeFromModels(runtime, normalizeModels([]rpcModelRecord{{
+		ID:            "gpt-5.6-terra",
+		Provider:      "openai-codex",
+		Reasoning:     true,
+		ContextWindow: 372000,
+		ThinkingLevelMap: map[string]*string{
+			"xhigh": stringPointer("xhigh"),
+			"max":   stringPointer("max"),
+		},
+	}}))
+	if enriched.ContextUsage == nil || enriched.ContextUsage.ContextWindow == nil {
+		t.Fatalf("ContextUsage = %#v, want Terra context", enriched.ContextUsage)
+	}
+	if got := *enriched.ContextUsage.ContextWindow; got != 372000 {
+		t.Fatalf("ContextWindow = %d, want 372000", got)
+	}
+	if enriched.ContextUsage.Percent == nil || *enriched.ContextUsage.Percent <= 0 {
+		t.Fatalf("Percent = %#v, want positive", enriched.ContextUsage.Percent)
+	}
+}
+
+func TestNormalizedContextUsageOmitsUnknownWindow(t *testing.T) {
+	tokens := 1_000
+	usage := normalizedContextUsage(&runtimeContextUsage{Tokens: &tokens, ContextWindow: intPointer(0)}, runtimeTokens{Total: tokens}, nil)
+	if usage.ContextWindow != nil || usage.Percent != nil {
+		t.Fatalf("usage = %#v, want no fabricated zero context", usage)
+	}
+}
+
+func stringPointer(value string) *string { return &value }
+func intPointer(value int) *int          { return &value }
 
 func writeTempSessionFile(t *testing.T, content string) string {
 	t.Helper()

@@ -424,11 +424,13 @@ type rpcSimpleCommand struct {
 }
 
 type rpcModelRecord struct {
-	ID            string `json:"id"`
-	Name          string `json:"name,omitempty"`
-	Provider      string `json:"provider"`
-	Reasoning     bool   `json:"reasoning,omitempty"`
-	ContextWindow int    `json:"contextWindow,omitempty"`
+	ID                      string             `json:"id"`
+	Name                    string             `json:"name,omitempty"`
+	Provider                string             `json:"provider"`
+	Reasoning               bool               `json:"reasoning,omitempty"`
+	ContextWindow           int                `json:"contextWindow,omitempty"`
+	ThinkingLevelMap        map[string]*string `json:"thinkingLevelMap,omitempty"`
+	SupportedThinkingLevels []string           `json:"supportedThinkingLevels,omitempty"`
 }
 
 type rpcAvailableModelsResponse struct {
@@ -450,7 +452,7 @@ type runtimeTokens struct {
 
 type runtimeContextUsage struct {
 	Tokens        *int     `json:"tokens,omitempty"`
-	ContextWindow int      `json:"contextWindow"`
+	ContextWindow *int     `json:"contextWindow,omitempty"`
 	Percent       *float64 `json:"percent,omitempty"`
 }
 
@@ -614,7 +616,7 @@ func (s *server) handleRuntimeDefaults(w http.ResponseWriter, r *http.Request) {
 	if cwd == "" {
 		cwd = os.Getenv("HOME")
 	}
-	payload := s.loadDefaultRuntimeFast(expandHome(cwd))
+	payload := s.loadDefaultRuntime(expandHome(cwd))
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -811,14 +813,7 @@ func (s *server) handleSessionSetModel(w http.ResponseWriter, r *http.Request, r
 		writeError(w, http.StatusBadRequest, "provider and modelId are required")
 		return
 	}
-	_, err := s.runPiRPCCommands(record, []any{
-		rpcSimpleCommand{Type: "set_model", Provider: request.Provider, ModelID: request.ModelID},
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	runtime, err := s.loadSessionRuntime(record)
+	runtime, err := s.mutateSessionRuntime(record, rpcSimpleCommand{Type: "set_model", Provider: request.Provider, ModelID: request.ModelID})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -841,14 +836,7 @@ func (s *server) handleSessionSetThinkingLevel(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "invalid thinking level")
 		return
 	}
-	_, err := s.runPiRPCCommands(record, []any{
-		rpcSimpleCommand{Type: "set_thinking_level", Level: request.Level},
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	runtime, err := s.loadSessionRuntime(record)
+	runtime, err := s.mutateSessionRuntime(record, rpcSimpleCommand{Type: "set_thinking_level", Level: request.Level})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -858,14 +846,7 @@ func (s *server) handleSessionSetThinkingLevel(w http.ResponseWriter, r *http.Re
 }
 
 func (s *server) handleSessionCycleThinking(w http.ResponseWriter, r *http.Request, record sessionRecord) {
-	_, err := s.runPiRPCCommands(record, []any{
-		rpcSimpleCommand{Type: "cycle_thinking_level"},
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	runtime, err := s.loadSessionRuntime(record)
+	runtime, err := s.mutateSessionRuntime(record, rpcSimpleCommand{Type: "cycle_thinking_level"})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -884,7 +865,7 @@ func (s *server) publishRuntime(record sessionRecord, runtime sessionRuntimeResp
 
 func isValidThinkingLevel(level string) bool {
 	switch level {
-	case "off", "minimal", "low", "medium", "high", "xhigh":
+	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
 		return true
 	default:
 		return false
@@ -2369,7 +2350,7 @@ func (s *server) streamPiRPCCommand(
 }
 func (s *server) loadSessionRuntime(record sessionRecord) (sessionRuntimeResponse, error) {
 	if runtime, err := loadFastSessionRuntime(record); err == nil {
-		return runtime, nil
+		return s.enrichSessionRuntime(record, runtime), nil
 	}
 	responses, err := s.runPiRPCCommands(record, []any{
 		rpcSimpleCommand{Type: "get_state"},
@@ -2378,7 +2359,30 @@ func (s *server) loadSessionRuntime(record sessionRecord) (sessionRuntimeRespons
 	if err != nil {
 		return sessionRuntimeResponse{}, err
 	}
-	return decodeSessionRuntimeResponse(responses)
+	runtime, err := decodeSessionRuntimeResponse(responses)
+	if err != nil {
+		return sessionRuntimeResponse{}, err
+	}
+	return s.enrichSessionRuntime(record, runtime), nil
+}
+
+// mutateSessionRuntime keeps the mutation and its authoritative state read in one
+// Pi RPC process. Reading JSONL immediately after a mutation is racy: the session
+// writer may not yet have appended its model/thinking change.
+func (s *server) mutateSessionRuntime(record sessionRecord, command rpcSimpleCommand) (sessionRuntimeResponse, error) {
+	responses, err := s.runPiRPCCommands(record, []any{
+		command,
+		rpcSimpleCommand{Type: "get_state"},
+		rpcSimpleCommand{Type: "get_session_stats"},
+	})
+	if err != nil {
+		return sessionRuntimeResponse{}, err
+	}
+	runtime, err := decodeSessionRuntimeResponse(responses)
+	if err != nil {
+		return sessionRuntimeResponse{}, err
+	}
+	return s.enrichSessionRuntime(record, runtime), nil
 }
 
 func loadFastSessionRuntime(record sessionRecord) (sessionRuntimeResponse, error) {
@@ -2461,8 +2465,9 @@ func loadFastSessionRuntime(record sessionRecord) (sessionRuntimeResponse, error
 		}
 		contextUsage := &runtimeContextUsage{Tokens: &contextTokens}
 		if runtime.Model != nil && runtime.Model.ContextWindow > 0 {
-			contextUsage.ContextWindow = runtime.Model.ContextWindow
-			percent := float64(contextTokens) / float64(runtime.Model.ContextWindow) * 100
+			contextWindow := runtime.Model.ContextWindow
+			contextUsage.ContextWindow = &contextWindow
+			percent := float64(contextTokens) / float64(contextWindow) * 100
 			contextUsage.Percent = &percent
 		}
 		runtime.ContextUsage = contextUsage
@@ -2478,28 +2483,31 @@ func (s *server) loadDefaultRuntimeFast(cwd string) sessionDefaultsResponse {
 	provider := firstNonBlank(settings.DefaultProvider, "")
 	modelID := firstNonBlank(settings.DefaultModel, "")
 	var model *rpcModelRecord
-	var contextUsage *runtimeContextUsage
 	if provider != "" && modelID != "" {
 		model = fastModelRecord(provider, modelID)
-		if model.ContextWindow > 0 {
-			zeroTokens := 0
-			zeroPercent := 0.0
-			contextUsage = &runtimeContextUsage{
-				Tokens:        &zeroTokens,
-				ContextWindow: model.ContextWindow,
-				Percent:       &zeroPercent,
-			}
-		}
 	}
 	return sessionDefaultsResponse{
 		Runtime: sessionRuntimeResponse{
 			Model:         model,
 			ThinkingLevel: firstNonBlank(settings.DefaultThinkingLevel, "off"),
 			Tokens:        runtimeTokens{},
-			ContextUsage:  contextUsage,
 		},
 		Models: s.cachedAvailableModels(),
 	}
+}
+
+// loadDefaultRuntime enriches settings-file defaults with the live Pi catalog.
+// Settings intentionally contain only provider/model IDs; windows and supported
+// thinking levels belong to Pi's model registry and must not be hardcoded here.
+func (s *server) loadDefaultRuntime(cwd string) sessionDefaultsResponse {
+	payload := s.loadDefaultRuntimeFast(cwd)
+	models, err := s.loadAvailableModels(cwd)
+	if err != nil {
+		return payload
+	}
+	payload.Models = models
+	payload.Runtime = s.enrichRuntimeFromModels(payload.Runtime, models)
+	return payload
 }
 
 func (s *server) loadAgentSettings() agentSettings {
@@ -2521,7 +2529,8 @@ func (s *server) cachedAvailableModels() []rpcModelRecord {
 }
 
 func (s *server) loadAvailableModels(cwd string) ([]rpcModelRecord, error) {
-	signature := s.modelsFilesSignature()
+	cwd = expandHome(cwd)
+	signature := s.modelsFilesSignature() + "|cwd:" + cwd
 	for {
 		s.modelsMu.Lock()
 		if len(s.modelsCache) > 0 && s.modelsCacheSignature == signature && time.Since(s.modelsCacheAt) < modelsCacheTTL {
@@ -2570,7 +2579,7 @@ func (s *server) fetchAvailableModels(cwd string) ([]rpcModelRecord, error) {
 	if err := decodeRPCSuccessResponse(responses, "get_available_models", &payload); err != nil {
 		return nil, err
 	}
-	return payload.Models, nil
+	return normalizeModels(payload.Models), nil
 }
 
 func (s *server) modelsFilesSignature() string {
@@ -2589,8 +2598,101 @@ func (s *server) modelsFilesSignature() string {
 
 func cloneModels(models []rpcModelRecord) []rpcModelRecord {
 	out := make([]rpcModelRecord, len(models))
-	copy(out, models)
+	for index, model := range models {
+		out[index] = cloneModel(model)
+	}
 	return out
+}
+
+func cloneModel(model rpcModelRecord) rpcModelRecord {
+	out := model
+	if model.ThinkingLevelMap != nil {
+		out.ThinkingLevelMap = make(map[string]*string, len(model.ThinkingLevelMap))
+		for key, value := range model.ThinkingLevelMap {
+			if value == nil {
+				out.ThinkingLevelMap[key] = nil
+				continue
+			}
+			copied := *value
+			out.ThinkingLevelMap[key] = &copied
+		}
+	}
+	out.SupportedThinkingLevels = append([]string(nil), model.SupportedThinkingLevels...)
+	return out
+}
+
+func normalizedModel(model rpcModelRecord) rpcModelRecord {
+	model.ID = strings.TrimSpace(model.ID)
+	model.Provider = strings.TrimSpace(model.Provider)
+	if !model.Reasoning {
+		model.SupportedThinkingLevels = []string{"off"}
+		return model
+	}
+	// Pi's map only declares provider-specific overrides. The five base levels
+	// are normalized by Pi for reasoning models; xhigh/max require an explicit
+	// map entry and must not be offered otherwise.
+	levels := []string{"off", "minimal", "low", "medium", "high"}
+	for _, level := range []string{"xhigh", "max"} {
+		if _, supported := model.ThinkingLevelMap[level]; supported {
+			levels = append(levels, level)
+		}
+	}
+	model.SupportedThinkingLevels = levels
+	return model
+}
+
+func normalizeModels(models []rpcModelRecord) []rpcModelRecord {
+	for index := range models {
+		models[index] = normalizedModel(models[index])
+	}
+	return models
+}
+
+func (s *server) enrichSessionRuntime(record sessionRecord, runtime sessionRuntimeResponse) sessionRuntimeResponse {
+	cwd := firstNonBlank(strings.TrimSpace(record.WorkingDirectory), filepath.Dir(record.FilePath), os.Getenv("HOME"))
+	models, err := s.loadAvailableModels(expandHome(cwd))
+	if err != nil {
+		return s.enrichRuntimeFromModels(runtime, nil)
+	}
+	return s.enrichRuntimeFromModels(runtime, models)
+}
+
+func (s *server) enrichRuntimeFromModels(runtime sessionRuntimeResponse, models []rpcModelRecord) sessionRuntimeResponse {
+	if runtime.Model != nil {
+		model := normalizedModel(cloneModel(*runtime.Model))
+		for _, candidate := range models {
+			if candidate.Provider == model.Provider && candidate.ID == model.ID {
+				model = cloneModel(candidate)
+				break
+			}
+		}
+		runtime.Model = &model
+	}
+	runtime.ContextUsage = normalizedContextUsage(runtime.ContextUsage, runtime.Tokens, runtime.Model)
+	return runtime
+}
+
+func normalizedContextUsage(current *runtimeContextUsage, tokens runtimeTokens, model *rpcModelRecord) *runtimeContextUsage {
+	if current == nil && model == nil && tokens.Total == 0 {
+		return nil
+	}
+	contextTokens := tokens.Total
+	if current != nil && current.Tokens != nil {
+		contextTokens = *current.Tokens
+	}
+	usage := &runtimeContextUsage{Tokens: &contextTokens}
+	var contextWindow int
+	if model != nil && model.ContextWindow > 0 {
+		contextWindow = model.ContextWindow
+	} else if current != nil && current.ContextWindow != nil && *current.ContextWindow > 0 {
+		contextWindow = *current.ContextWindow
+	}
+	if contextWindow > 0 {
+		usage.ContextWindow = &contextWindow
+		percent := float64(contextTokens) / float64(contextWindow) * 100
+		usage.Percent = &percent
+	}
+	return usage
 }
 
 func decodeSessionRuntimeResponse(responses map[string]rpcResponseEnvelope) (sessionRuntimeResponse, error) {
@@ -2615,7 +2717,7 @@ func decodeSessionRuntimeResponse(responses map[string]rpcResponseEnvelope) (ses
 		Model:         state.Model,
 		ThinkingLevel: firstNonBlank(state.ThinkingLevel, "off"),
 		Tokens:        stats.Tokens,
-		ContextUsage:  stats.ContextUsage,
+		ContextUsage:  normalizedContextUsage(stats.ContextUsage, stats.Tokens, state.Model),
 	}, nil
 }
 
@@ -3594,31 +3696,7 @@ func intValue(object map[string]any, keys ...string) int {
 }
 
 func fastModelRecord(provider string, modelID string) *rpcModelRecord {
-	model := &rpcModelRecord{Provider: provider, ID: modelID, Name: modelID}
-	model.ContextWindow = contextWindowForModel(provider, modelID)
-	return model
-}
-
-func contextWindowForModel(provider string, modelID string) int {
-	key := strings.ToLower(provider + "/" + modelID)
-	switch {
-	case strings.Contains(key, "gpt-5.5"), strings.Contains(key, "gpt-5.4"):
-		return 272000
-	case strings.Contains(key, "gpt-5.3"):
-		return 128000
-	case strings.Contains(key, "minimax-m3"):
-		return 512000
-	case strings.Contains(key, "minimax-m2"):
-		return 205000
-	case strings.Contains(key, "deepseek-v4"), strings.Contains(key, "qwen3.7-max"), strings.Contains(key, "mimo-v2.5"):
-		return 1000000
-	case strings.Contains(key, "qwen3.7"), strings.Contains(key, "qwen3.6"), strings.Contains(key, "kimi-k2"):
-		return 262000
-	case strings.Contains(key, "glm-5"):
-		return 203000
-	default:
-		return 0
-	}
+	return &rpcModelRecord{Provider: provider, ID: modelID, Name: modelID}
 }
 
 func modelDescription(object map[string]any) string {

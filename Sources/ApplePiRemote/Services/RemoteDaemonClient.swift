@@ -467,9 +467,15 @@ public struct RemoteDaemonClient: Sendable {
     }
 
     public func loadAvailableModels(host: PiHostConfiguration, sessionID: String? = nil, tokenOverride: String? = nil) async throws -> [PiModelOption] {
+        let path: String
+        if let sessionID = sessionID?.nilIfBlank {
+            path = "/sessions/\(encodedPathComponent(sessionID))/models"
+        } else {
+            path = "/models"
+        }
         let response: AvailableModelsResponse = try await send(
             host: host,
-            path: "/models",
+            path: path,
             tokenOverride: tokenOverride
         )
         return response.models.map(\.piModelOption)
@@ -1549,8 +1555,8 @@ private struct SessionRuntimeResponse: Decodable {
             contextUsage: contextUsage.map {
                 SessionContextUsage(
                     tokens: $0.tokens,
-                    contextWindow: $0.contextWindow,
-                    percent: $0.percent
+                    contextWindow: ($0.contextWindow ?? 0) > 0 ? $0.contextWindow : nil,
+                    percent: ($0.contextWindow ?? 0) > 0 ? $0.percent : nil
                 )
             }
         )
@@ -1563,6 +1569,7 @@ private struct RuntimeModelRecord: Decodable {
     let provider: String
     let reasoning: Bool?
     let contextWindow: Int?
+    let supportedThinkingLevels: [String]?
 
     var piModelOption: PiModelOption {
         PiModelOption(
@@ -1570,7 +1577,8 @@ private struct RuntimeModelRecord: Decodable {
             modelID: id,
             name: name,
             reasoning: reasoning ?? false,
-            contextWindow: contextWindow
+            contextWindow: contextWindow,
+            supportedThinkingLevels: supportedThinkingLevels
         )
     }
 }

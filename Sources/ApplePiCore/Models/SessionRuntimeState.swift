@@ -1,23 +1,43 @@
 import Foundation
 
 public struct PiModelOption: Identifiable, Hashable, Codable, Sendable {
+    public static let fallbackThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
     public let provider: String
     public let modelID: String
     public let name: String?
     public let reasoning: Bool
     public let contextWindow: Int?
+    /// Ordered capabilities normalized by pi-appd from Pi's model registry.
+    /// Optional keeps cached model catalogs from older app versions decodable.
+    public let supportedThinkingLevels: [String]?
 
-    public init(provider: String, modelID: String, name: String?, reasoning: Bool, contextWindow: Int?) {
+    public init(
+        provider: String,
+        modelID: String,
+        name: String?,
+        reasoning: Bool,
+        contextWindow: Int?,
+        supportedThinkingLevels: [String]? = nil
+    ) {
         self.provider = provider
         self.modelID = modelID
         self.name = name
         self.reasoning = reasoning
         self.contextWindow = contextWindow
+        self.supportedThinkingLevels = supportedThinkingLevels
     }
 
     public var id: String { "\(provider)/\(modelID)" }
     public var displayName: String { id }
     public var shortLabel: String { modelID }
+
+    public var thinkingLevels: [String] {
+        if let supportedThinkingLevels, !supportedThinkingLevels.isEmpty {
+            return supportedThinkingLevels
+        }
+        return reasoning ? Self.fallbackThinkingLevels : ["off"]
+    }
 }
 
 public struct DefaultModelPreference: Hashable, Codable, Sendable {

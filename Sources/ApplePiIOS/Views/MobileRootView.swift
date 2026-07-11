@@ -2333,7 +2333,7 @@ private struct MobileThinkingPickerSheet: View {
     var body: some View {
         MobileChoiceList(
             title: "Thinking",
-            choices: MobilePiAppState.thinkingLevels,
+            choices: appState.selectedThinkingLevels,
             selected: appState.selectedThinkingLevel,
             includesDefault: false,
             onSelect: { level in
@@ -2354,7 +2354,7 @@ private struct MobileDefaultThinkingPickerSheet: View {
     var body: some View {
         MobileChoiceList(
             title: "Default thinking",
-            choices: MobilePiAppState.thinkingLevels,
+            choices: appState.defaultThinkingLevels,
             selected: appState.defaultModelPreference?.thinkingLevel,
             includesDefault: true,
             onSelect: { level in
