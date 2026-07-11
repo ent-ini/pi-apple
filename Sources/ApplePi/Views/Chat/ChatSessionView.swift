@@ -89,6 +89,7 @@ struct ChatSessionView: View {
         .onAppear {
             if session.sessionID != nil {
                 appState.refreshSessionRuntime(for: session)
+                appState.refreshAvailableModels(for: session)
             } else {
                 appState.hydratePendingSessionDefaults(for: session)
             }
@@ -202,13 +203,23 @@ struct ChatSessionView: View {
             .background(ModelPickerButtonFrameReader())
             .zIndex(5)
 
-            Button {
-                showsModelPicker = false
-                appState.cycleThinkingLevel(in: session)
+            Menu {
+                ForEach(appState.availableThinkingLevels(in: session), id: \.self) { level in
+                    Button {
+                        showsModelPicker = false
+                        appState.selectThinkingLevel(level, in: session)
+                    } label: {
+                        if level == displayedThinkingLevel {
+                            Label(level, systemImage: "checkmark")
+                        } else {
+                            Text(level)
+                        }
+                    }
+                }
             } label: {
-                inlineStatusButton(title: thinkingControlTitle)
+                inlineStatusButton(title: thinkingControlTitle, showsChevron: true)
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
             .disabled(!canAdjustSessionOptions)
 
             Spacer(minLength: 0)

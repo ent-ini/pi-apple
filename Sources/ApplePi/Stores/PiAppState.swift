@@ -1783,12 +1783,48 @@ final class PiAppState: ObservableObject {
         }
     }
 
+    func selectThinkingLevel(_ level: String, in session: ChatSession) {
+        let normalized = level.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard availableThinkingLevels(in: session).contains(normalized) else {
+            statusMessage = "Thinking level \(normalized) is not supported by this model."
+            return
+        }
+        guard let sessionID = session.sessionID?.nilIfBlank else {
+            if var request = session.launchRequest {
+                request.initialThinkingLevel = normalized
+                request.hasExplicitInitialThinkingLevel = true
+                session.updateLaunchRequest(request)
+            }
+            if let current = session.runtimeState {
+                session.updateRuntimeState(
+                    SessionRuntimeState(
+                        sessionID: current.sessionID,
+                        sessionPath: current.sessionPath,
+                        provider: current.provider,
+                        modelID: current.modelID,
+                        modelName: current.modelName,
+                        thinkingLevel: normalized,
+                        tokens: current.tokens,
+                        contextUsage: current.contextUsage
+                    )
+                )
+            }
+            statusMessage = "Thinking: \(normalized)"
+            return
+        }
+        applyPersistedThinkingLevel(in: session, sessionID: sessionID, level: normalized)
+    }
+
     private func applyPersistedThinkingCycle(in session: ChatSession, sessionID: String, levels: [String]) {
         let currentLevel = effectiveThinkingLevel(for: session)
         let nextLevel = nextThinkingLevel(after: currentLevel, levels: levels)
+        applyPersistedThinkingLevel(in: session, sessionID: sessionID, level: nextLevel)
+    }
+
+    private func applyPersistedThinkingLevel(in session: ChatSession, sessionID: String, level: String) {
         let sessionKey = runtimeSessionKey(for: session)
         let mutationVersion = nextThinkingLevelMutationVersion(for: sessionKey)
-        pendingThinkingLevelBySessionKey[sessionKey] = nextLevel
+        pendingThinkingLevelBySessionKey[sessionKey] = level
 
         if let current = session.runtimeState {
             session.updateRuntimeState(
@@ -1798,13 +1834,13 @@ final class PiAppState: ObservableObject {
                     provider: current.provider,
                     modelID: current.modelID,
                     modelName: current.modelName,
-                    thinkingLevel: nextLevel,
+                    thinkingLevel: level,
                     tokens: current.tokens,
                     contextUsage: current.contextUsage
                 )
             )
         }
-        statusMessage = "Thinking: \(nextLevel)"
+        statusMessage = "Thinking: \(level)"
 
         let remoteAPIHost = host
         Task { [weak self, weak session] in
@@ -1812,7 +1848,7 @@ final class PiAppState: ObservableObject {
                 let runtime = try await RemoteDaemonClient().setSessionThinkingLevel(
                     host: remoteAPIHost,
                     sessionID: sessionID,
-                    level: nextLevel
+                    level: level
                 )
                 await MainActor.run {
                     guard let self, let session, self.host == remoteAPIHost else { return }
@@ -1834,6 +1870,10 @@ final class PiAppState: ObservableObject {
     }
 
     static let thinkingLevels = PiModelOption.fallbackThinkingLevels
+
+    func availableThinkingLevels(in session: ChatSession) -> [String] {
+        thinkingLevels(for: session)
+    }
 
     private func thinkingLevels(for session: ChatSession) -> [String] {
         let provider = session.runtimeState?.provider?.nilIfBlank ?? session.launchRequest?.initialModelProvider?.nilIfBlank

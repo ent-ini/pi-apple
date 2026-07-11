@@ -20,6 +20,18 @@ private actor SessionEventsPageBox {
     }
 }
 
+private actor IntBox {
+    private var value: Int?
+
+    func get() -> Int? {
+        value
+    }
+
+    func set(_ value: Int?) {
+        self.value = value
+    }
+}
+
 // MARK: - ChatSession cancellation
 
 @MainActor
@@ -227,6 +239,62 @@ private actor SessionEventsPageBox {
     }
     #expect(userMessages.count == 2)
     #expect(userMessages.map(\.id).contains("old-user"))
+}
+
+@MainActor
+@Test func chatSessionDoesNotHideSameTextAssistantStreamAgainstOlderPersistedTurn() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.appendPersistedEvents([
+        .message(
+            Message(id: "old-assistant", role: .assistant, content: [.text("same answer")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 0
+        )
+    ])
+
+    session.beginSending(prompt: "again")
+    session.applyStreamingEvents([
+        .message(
+            Message(id: "new-assistant", role: .assistant, content: [.text("same answer")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 1
+        )
+    ], isFinal: false)
+
+    let assistantIDs = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event,
+              message.role == .assistant else { return nil }
+        return message.id
+    }
+    #expect(assistantIDs == ["old-assistant", "new-assistant"])
+}
+
+@MainActor
+@Test func chatSessionReconcilesSameTextAssistantStreamWithNewPersistedTurnOnlyOnce() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.beginSending(prompt: "again")
+    session.applyStreamingEvents([
+        .message(
+            Message(id: "stream-a", role: .assistant, content: [.text("same answer")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 0
+        ),
+        .message(
+            Message(id: "stream-b", role: .assistant, content: [.text("same answer")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 1
+        )
+    ], isFinal: false)
+
+    session.appendPersistedEvents([
+        .message(
+            Message(id: "persisted-a", role: .assistant, content: [.text("same answer")], model: nil, timestamp: nil, parentId: nil),
+            lineIndex: 0
+        )
+    ])
+
+    let assistantIDs = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event,
+              message.role == .assistant else { return nil }
+        return message.id
+    }
+    #expect(assistantIDs == ["persisted-a", "stream-b"])
 }
 
 @MainActor
@@ -616,6 +684,88 @@ private actor SessionEventsPageBox {
         if case .message(let message, _) = event { return message.id == "m11" }
         return false
     })
+}
+
+@MainActor
+@Test func chatSessionForcedReloadMiddleGapCanBeRecoveredWithHistoryLoader() async throws {
+    let pageBox = SessionEventsPageBox(SessionEventsPage(
+        events: [
+            .message(
+                Message(id: "m0", role: .user, content: [.text("zero")], model: nil, timestamp: nil, parentId: nil),
+                lineIndex: 0
+            ),
+            .message(
+                Message(id: "m1", role: .assistant, content: [.text("one")], model: nil, timestamp: nil, parentId: nil),
+                lineIndex: 1
+            )
+        ],
+        firstLine: 0,
+        lastLine: 1,
+        hasMoreBefore: false,
+        hasMoreAfter: false
+    ))
+    let requestedBefore = IntBox()
+
+    let session = ChatSession(
+        key: "test",
+        title: "Test",
+        eventLoader: { await pageBox.get() },
+        historyPageLoader: { before, _ in
+            await requestedBefore.set(before)
+            return SessionEventsPage(
+                events: [
+                    .message(
+                        Message(id: "m2", role: .user, content: [.text("two")], model: nil, timestamp: nil, parentId: nil),
+                        lineIndex: 2
+                    ),
+                    .message(
+                        Message(id: "m3", role: .assistant, content: [.text("three")], model: nil, timestamp: nil, parentId: nil),
+                        lineIndex: 3
+                    ),
+                    .message(
+                        Message(id: "m4", role: .user, content: [.text("four")], model: nil, timestamp: nil, parentId: nil),
+                        lineIndex: 4
+                    )
+                ],
+                firstLine: 2,
+                lastLine: 4,
+                hasMoreBefore: false,
+                hasMoreAfter: true
+            )
+        }
+    )
+
+    session.loadFromDisk(force: true)
+    try await waitUntil { session.lastPersistedLineIndex == 1 }
+    await pageBox.set(SessionEventsPage(
+        events: [
+            .message(
+                Message(id: "m5", role: .assistant, content: [.text("five")], model: nil, timestamp: nil, parentId: nil),
+                lineIndex: 5
+            )
+        ],
+        firstLine: 5,
+        lastLine: 5,
+        hasMoreBefore: true,
+        hasMoreAfter: false
+    ))
+
+    session.loadFromDisk(force: true)
+    try await waitUntil { session.lastPersistedLineIndex == 5 }
+    #expect(session.hasEarlierHistory)
+
+    session.loadEarlierHistory(limit: 120)
+    try await waitUntil { session.events.contains { event in
+        if case .message(let message, _) = event { return message.id == "m4" }
+        return false
+    } }
+
+    #expect(await requestedBefore.get() == 5)
+    #expect(session.events.compactMap { event -> Int? in
+        if case .message(_, let lineIndex) = event { return lineIndex }
+        return nil
+    } == [0, 1, 2, 3, 4, 5])
+    #expect(session.hasEarlierHistory == false)
 }
 
 @MainActor

@@ -55,15 +55,15 @@ package enum SessionEventParser {
 
         switch type {
         case "session", "session_info":
-            guard let meta = decodeSessionMeta(from: object) else { return [] }
+            guard let meta = decodeSessionMeta(from: object, lineIndex: lineIndex) else { return [] }
             return [.meta(meta, lineIndex: lineIndex)]
         case "message":
             return decodeMessageEvents(from: object, lineIndex: lineIndex)
         case "tool_use", "tool_call":
-            guard let call = parseToolCall(object) else { return [] }
+            guard let call = parseToolCall(object, lineIndex: lineIndex) else { return [] }
             return [.toolCall(call, lineIndex: lineIndex)]
         case "tool_result":
-            guard let result = parseToolResult(object) else { return [] }
+            guard let result = parseToolResult(object, lineIndex: lineIndex) else { return [] }
             return [.toolResult(result, lineIndex: lineIndex)]
         default:
             return [.other(type: type, lineIndex: lineIndex)]
@@ -72,7 +72,7 @@ package enum SessionEventParser {
 
     // MARK: - Field decoders
 
-    package static func decodeSessionMeta(from object: [String: Any]) -> SessionMeta? {
+    package static func decodeSessionMeta(from object: [String: Any], lineIndex: Int? = nil) -> SessionMeta? {
         let id = stringValue(from: object, keys: ["sessionId", "sessionID", "id"])
         let cwd = stringValue(from: object, keys: ["cwd", "workingDirectory"])
         let parent = stringValue(from: object, keys: ["parentSession"])
@@ -81,7 +81,7 @@ package enum SessionEventParser {
         // file's first line is usually the session declaration and we want
         // the working directory even when no session id is set yet.
         return SessionMeta(
-            id: id ?? UUID().uuidString,
+            id: id ?? stableLineScopedID(kind: "meta", lineIndex: lineIndex),
             workingDirectory: cwd,
             parentSession: parent,
             displayName: name
@@ -100,7 +100,7 @@ package enum SessionEventParser {
         else { return [] }
 
         if roleString == "toolResult" {
-            guard let result = parseToolResultFromMessage(payload, parentID: object["id"] as? String) else {
+            guard let result = parseToolResultFromMessage(payload, parentID: object["id"] as? String, lineIndex: lineIndex) else {
                 return []
             }
             return [.toolResult(result, lineIndex: lineIndex)]
@@ -112,7 +112,7 @@ package enum SessionEventParser {
             ?? (payload["id"] as? String)
             ?? (payload["responseId"] as? String)
             ?? (object["responseId"] as? String)
-            ?? UUID().uuidString
+            ?? stableLineScopedID(kind: "message", lineIndex: lineIndex)
         var content = parseContent(payload["content"])
         if content.isEmpty,
            role == .assistant,
@@ -185,7 +185,7 @@ package enum SessionEventParser {
         var events: [SessionEvent] = []
         var fragmentBlocks: [ContentBlock] = []
         var fragmentStartIndex: Int?
-        let hasToolCall = rawBlocks.contains { parseToolCallFromContentBlock($0) != nil }
+        let hasToolCall = rawBlocks.contains { parseToolCallFromContentBlock($0, fallbackID: "toolCall:probe") != nil }
 
         func flushFragment() {
             guard !fragmentBlocks.isEmpty else { return }
@@ -214,7 +214,10 @@ package enum SessionEventParser {
         }
 
         for (blockIndex, block) in rawBlocks.enumerated() {
-            if let call = parseToolCallFromContentBlock(block) {
+            if let call = parseToolCallFromContentBlock(
+                block,
+                fallbackID: stableLineScopedID(kind: "toolCall", lineIndex: lineIndex, suffix: "block-\(blockIndex)")
+            ) {
                 flushFragment()
                 events.append(.toolCall(call, lineIndex: lineIndex))
                 continue
@@ -332,8 +335,8 @@ package enum SessionEventParser {
         return text
     }
 
-    private static func parseToolCall(_ object: [String: Any]) -> ToolCall? {
-        let id = (object["id"] as? String) ?? UUID().uuidString
+    private static func parseToolCall(_ object: [String: Any], lineIndex: Int) -> ToolCall? {
+        let id = (object["id"] as? String) ?? stableLineScopedID(kind: "toolCall", lineIndex: lineIndex)
         let name = (object["name"] as? String) ?? (object["toolName"] as? String) ?? "tool"
         let arguments = stringifyArguments(object["input"] ?? object["arguments"])
         return .function(id: id, name: name, arguments: arguments)
@@ -343,9 +346,9 @@ package enum SessionEventParser {
     /// message. Pi uses `id`, `name`, and `arguments` (an object) inside
     /// content blocks — distinct from the top-level `tool_use` shape which
     /// exposes the payload as `input`.
-    private static func parseToolCallFromContentBlock(_ block: [String: Any]) -> ToolCall? {
+    private static func parseToolCallFromContentBlock(_ block: [String: Any], fallbackID: String) -> ToolCall? {
         guard (block["type"] as? String) == "toolCall" else { return nil }
-        let id = (block["id"] as? String) ?? UUID().uuidString
+        let id = (block["id"] as? String) ?? fallbackID
         let name = (block["name"] as? String) ?? "tool"
         let arguments = stringifyArguments(block["arguments"] ?? block["input"])
         return .function(id: id, name: name, arguments: arguments)
@@ -364,9 +367,9 @@ package enum SessionEventParser {
         return "\(value)"
     }
 
-    private static func parseToolResult(_ object: [String: Any]) -> ToolResult? {
+    private static func parseToolResult(_ object: [String: Any], lineIndex: Int) -> ToolResult? {
         let callId = (object["toolCallId"] as? String) ?? (object["callId"] as? String) ?? ""
-        let id = (object["id"] as? String) ?? stableToolResultID(for: callId)
+        let id = (object["id"] as? String) ?? stableToolResultID(for: callId, lineIndex: lineIndex)
         let toolName = (object["toolName"] as? String)
         let isError = (object["isError"] as? Bool) ?? false
         let details = object["details"]
@@ -382,9 +385,9 @@ package enum SessionEventParser {
     /// (`toolCallId`, `toolName`, `content`, `isError`, `timestamp`). The
     /// event id is taken from the outer message id when present so the chat
     /// view can de-duplicate against the live tail.
-    private static func parseToolResultFromMessage(_ payload: [String: Any], parentID: String?) -> ToolResult? {
+    private static func parseToolResultFromMessage(_ payload: [String: Any], parentID: String?, lineIndex: Int) -> ToolResult? {
         let callId = (payload["toolCallId"] as? String) ?? (payload["callId"] as? String) ?? ""
-        let id = parentID ?? (payload["id"] as? String) ?? stableToolResultID(for: callId)
+        let id = parentID ?? (payload["id"] as? String) ?? stableToolResultID(for: callId, lineIndex: lineIndex)
         let toolName = (payload["toolName"] as? String)
         let isError = (payload["isError"] as? Bool) ?? false
         let details = payload["details"]
@@ -395,8 +398,17 @@ package enum SessionEventParser {
         return .result(id: id, callId: callId, toolName: toolName, output: output, isError: isError, detailsJSON: detailsJSONString(details))
     }
 
-    private static func stableToolResultID(for callId: String) -> String {
-        callId.isEmpty ? UUID().uuidString : "toolResult:\(callId)"
+    private static func stableToolResultID(for callId: String, lineIndex: Int?) -> String {
+        if !callId.isEmpty { return "toolResult:\(callId)" }
+        return stableLineScopedID(kind: "toolResult", lineIndex: lineIndex)
+    }
+
+    private static func stableLineScopedID(kind: String, lineIndex: Int?, suffix: String? = nil) -> String {
+        var components = [kind, "line", lineIndex.map(String.init) ?? "unknown"]
+        if let suffix, !suffix.isEmpty {
+            components.append(suffix)
+        }
+        return components.joined(separator: ":")
     }
 
     private static func detailsJSONString(_ details: Any?) -> String? {

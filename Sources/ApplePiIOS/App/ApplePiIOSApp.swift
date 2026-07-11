@@ -320,16 +320,22 @@ final class MobilePiAppState: ObservableObject {
                     for try await event in client.streamCatalogSnapshots(host: host, tokenOverride: token) {
                         guard !Task.isCancelled else { return }
                         await MainActor.run { [weak self] in
-                            self?.handleCatalogStreamEvent(event)
+                            guard let self, self.host == host else { return }
+                            self.handleCatalogStreamEvent(event)
                         }
                     }
-                    return
-                } catch {
-                    await MainActor.run {
-                        self?.statusMessage = "Catalog stream disconnected: \(error.localizedDescription)"
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run { [weak self] in
+                        guard let self, self.isAppActive, self.host == host else { return }
+                        self.statusMessage = "Catalog stream ended; reconnecting…"
                     }
-                    try? await Task.sleep(for: .seconds(2))
+                } catch {
+                    await MainActor.run { [weak self] in
+                        guard let self, self.isAppActive, self.host == host else { return }
+                        self.statusMessage = "Catalog stream disconnected: \(error.localizedDescription)"
+                    }
                 }
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -1006,20 +1012,25 @@ final class MobilePiAppState: ObservableObject {
                     for try await page in client.streamSessionEventPages(host: host, sessionID: sessionID, after: after, tokenOverride: token) {
                         guard !Task.isCancelled else { return }
                         await MainActor.run {
-                            guard let self, self.selectedSession?.id == sessionID else { return }
+                            guard let self, self.host == host, self.selectedSession?.id == sessionID else { return }
                             self.mergePersistedPage(page)
                             after = self.selectedLastLine ?? after
                         }
                     }
-                    return
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        guard let self, self.host == host, self.selectedSession?.id == sessionID else { return }
+                        self.statusMessage = "Session stream ended; reconnecting…"
+                        after = self.selectedLastLine ?? after
+                    }
                 } catch {
                     await MainActor.run {
-                        guard let self, self.selectedSession?.id == sessionID else { return }
+                        guard let self, self.host == host, self.selectedSession?.id == sessionID else { return }
                         self.statusMessage = "Session stream disconnected: \(error.localizedDescription)"
                         after = self.selectedLastLine ?? after
                     }
-                    try? await Task.sleep(for: .seconds(1))
                 }
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
@@ -1041,10 +1052,43 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func replaceSelectedTranscript(with page: SessionEventsPage) {
-        selectedEvents = page.events.map(compactEventForMobileMemory)
-        selectedPersistedEventIDs = Set(selectedEvents.map(\.id))
-        selectedFirstLine = page.firstLine ?? page.events.map(\.lineIndex).min()
-        selectedLastLine = page.lastLine ?? page.events.map(\.lineIndex).max()
+        let previousEvents = selectedEvents
+        let previousPersistedIDs = selectedPersistedEventIDs
+        let pageEvents = page.events.map(compactEventForMobileMemory)
+        var mergedEvents = pageEvents
+        var mergedPersistedIDs = Set(pageEvents.map(\.id))
+        let pageLastLine = page.lastLine ?? pageEvents.map(\.lineIndex).max()
+        var matchedPageEventIDs = Set<String>()
+
+        for existing in previousEvents where !mergedPersistedIDs.contains(existing.id) {
+            if previousPersistedIDs.contains(existing.id) {
+                // A live persisted SSE page can arrive while the initial REST
+                // page is still in flight. Keep newer persisted rows instead
+                // of rolling the transcript back to the REST response window.
+                if let pageLastLine, existing.lineIndex > pageLastLine {
+                    mergedEvents.append(existing)
+                    mergedPersistedIDs.insert(existing.id)
+                }
+                continue
+            }
+
+            let matchesPageReplacement = pageEvents.contains { pageEvent in
+                guard !matchedPageEventIDs.contains(pageEvent.id),
+                      transientEvent(existing, matchesPersistedReplacement: pageEvent) else {
+                    return false
+                }
+                matchedPageEventIDs.insert(pageEvent.id)
+                return true
+            }
+            if !matchesPageReplacement {
+                mergedEvents.append(existing)
+            }
+        }
+
+        selectedEvents = mergedEvents
+        selectedPersistedEventIDs = mergedPersistedIDs
+        selectedFirstLine = page.firstLine ?? pageEvents.map(\.lineIndex).min()
+        selectedLastLine = [page.lastLine, selectedPersistedEventsLastLine()].compactMap { $0 }.max()
         hasEarlierHistory = page.hasMoreBefore && ((selectedFirstLine ?? 0) > 0)
         sortSelectedEventsForDisplay()
     }
@@ -1055,7 +1099,7 @@ final class MobilePiAppState: ObservableObject {
         for rawEvent in page.events {
             let event = compactEventForMobileMemory(rawEvent)
             selectedPersistedEventIDs.insert(event.id)
-            removeTransientEvents(matchingPersisted: event)
+            removeTransientEvent(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: true)
         }
         if let firstLine = page.firstLine {
@@ -1090,7 +1134,7 @@ final class MobilePiAppState: ObservableObject {
             let event = compactEventForMobileMemory(rawEvent)
             guard !selectedPersistedEventIDs.contains(event.id) else { continue }
             selectedPersistedEventIDs.insert(event.id)
-            removeTransientEvents(matchingPersisted: event)
+            removeTransientEvent(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: true)
         }
         if let firstLine = page.firstLine {
@@ -1113,7 +1157,7 @@ final class MobilePiAppState: ObservableObject {
         for rawEvent in events {
             let event = compactEventForMobileMemory(rawEvent)
             guard !selectedPersistedEventIDs.contains(event.id) else { continue }
-            removeTransientEvents(matchingPersisted: event)
+            removeTransientEvent(matchingPersisted: event)
             upsertSelectedEvent(event, allowPersistedToWin: false)
         }
         sortSelectedEventsForDisplay()
@@ -1222,11 +1266,12 @@ final class MobilePiAppState: ObservableObject {
         }
     }
 
-    private func removeTransientEvents(matchingPersisted persistedEvent: SessionEvent) {
-        selectedEvents.removeAll { existing in
+    private func removeTransientEvent(matchingPersisted persistedEvent: SessionEvent) {
+        guard let index = selectedEvents.firstIndex(where: { existing in
             !selectedPersistedEventIDs.contains(existing.id)
                 && transientEvent(existing, matchesPersistedReplacement: persistedEvent)
-        }
+        }) else { return }
+        selectedEvents.remove(at: index)
     }
 
     private func transientEvent(_ transient: SessionEvent, matchesPersistedReplacement persisted: SessionEvent) -> Bool {
@@ -1297,6 +1342,33 @@ final class MobilePiAppState: ObservableObject {
         guard selectedEvents.count > Self.maxSelectedEventsRetained else { return }
         selectedEvents = Array(selectedEvents.suffix(Self.maxSelectedEventsRetained))
         selectedPersistedEventIDs = selectedPersistedEventIDs.intersection(Set(selectedEvents.map(\.id)))
+        reconcileSelectedLineCursorsAfterRetentionTrim()
+    }
+
+    private func selectedPersistedEventsLastLine() -> Int? {
+        selectedEvents.compactMap { event in
+            guard selectedPersistedEventIDs.contains(event.id), event.lineIndex != Int.max else { return nil }
+            return event.lineIndex
+        }.max()
+    }
+
+    private func reconcileSelectedLineCursorsAfterRetentionTrim() {
+        let retainedLines = selectedEvents.compactMap { event -> Int? in
+            guard selectedPersistedEventIDs.contains(event.id), event.lineIndex != Int.max else { return nil }
+            return event.lineIndex
+        }
+        guard let firstRetainedLine = retainedLines.min(),
+              let lastRetainedLine = retainedLines.max() else {
+            selectedFirstLine = nil
+            selectedLastLine = nil
+            hasEarlierHistory = false
+            return
+        }
+        selectedFirstLine = firstRetainedLine
+        selectedLastLine = lastRetainedLine
+        if firstRetainedLine > 0 {
+            hasEarlierHistory = true
+        }
     }
 
     private static func selectableModels(from models: [PiModelOption]) -> [PiModelOption] {

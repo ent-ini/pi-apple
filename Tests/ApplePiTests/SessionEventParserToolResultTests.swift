@@ -45,6 +45,28 @@ struct SessionEventParserToolResultTests {
     }
 
     @Test
+    func idLessPersistedRecordsReceiveDeterministicLineScopedIdentities() {
+        let lines = [
+            #"{"type":"message","message":{"role":"user","content":"same"}}"#,
+            #"{"type":"message","message":{"role":"user","content":"same"}}"#,
+            #"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"read","arguments":{"path":"a"}},{"type":"text","text":"done"}]}}"#,
+            #"{"type":"tool_result","content":"ok"}"#
+        ]
+
+        let firstParse = SessionEventParser.parse(lines: lines)
+        let secondParse = SessionEventParser.parse(lines: lines)
+
+        #expect(firstParse.map(\.id) == secondParse.map(\.id))
+        #expect(firstParse.map(\.id) == [
+            "message:message:line:0",
+            "message:message:line:1",
+            "toolCall:toolCall:line:2:block-0",
+            "message:message:line:2#block-1",
+            "toolResult:toolResult:line:3"
+        ])
+    }
+
+    @Test
     func toolResultRoleMessagePropagatesIsErrorAndMissingToolName() {
         // Pi marks failed tools with `isError: true` and older sessions
         // sometimes omit `toolName` on the result. The parser must keep

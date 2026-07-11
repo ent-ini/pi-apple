@@ -608,7 +608,8 @@ private struct MobileSessionDetailView: View {
                     isTranscriptDetachedByUser = true
                     cancelBottomScrollWorkItems()
                     if let anchorID = appState.consumePendingEarlierHistoryAnchorID() {
-                        proxy.scrollTo(anchorID, anchor: .top)
+                        let rowID = MobileDisplayedRow.scrollID(forEventID: anchorID, in: rows) ?? anchorID
+                        proxy.scrollTo(rowID, anchor: .top)
                     }
                 }
                 .onChange(of: keyboardObserver.visibleHeight) { oldHeight, newHeight in
@@ -1312,6 +1313,19 @@ private enum MobileDisplayedRow: Identifiable, Hashable {
         case .toolInteraction(let call, let result, _):
             return "toolInteraction:\(call.id):\(call.arguments.count):\(result?.output.count ?? 0)"
         }
+    }
+
+    func containsEventID(_ eventID: String) -> Bool {
+        switch self {
+        case .event(let event):
+            return event.id == eventID
+        case .toolInteraction(let call, let result, _):
+            return eventID == "toolCall:\(call.id)" || result.map { eventID == "toolResult:\($0.id)" } == true
+        }
+    }
+
+    static func scrollID(forEventID eventID: String, in rows: [MobileDisplayedRow]) -> String? {
+        rows.first { $0.containsEventID(eventID) }?.id
     }
 
     static func groupingToolResults(in events: [SessionEvent]) -> [MobileDisplayedRow] {

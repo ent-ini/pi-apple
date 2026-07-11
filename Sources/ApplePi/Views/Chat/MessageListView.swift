@@ -91,7 +91,8 @@ struct MessageListView: View {
                     cancelBottomScrollWorkItems()
                     refreshDisplayedRowsCache()
                     if let anchorID = session.consumePendingHistoryAnchorID() {
-                        scrollProxy.scrollTo(anchorID, anchor: .top)
+                        let rowAnchorID = DisplayedSessionRow.renderedAnchorID(forEventID: anchorID, in: displayedRowsCache)
+                        scrollProxy.scrollTo(rowAnchorID, anchor: .top)
                     }
                 }
                 .onChange(of: session.isSending) { _, isSending in
@@ -624,6 +625,23 @@ private enum DisplayedSessionRow: Identifiable, Hashable {
         case .toolInteraction(let call, _, _):
             return "toolInteraction:\(call.id)"
         }
+    }
+
+    static func renderedAnchorID(forEventID eventID: String, in rows: [DisplayedSessionRow]) -> String {
+        for row in rows {
+            if row.id == eventID {
+                return eventID
+            }
+            if case .toolInteraction(let call, let result, _) = row {
+                if eventID == "toolCall:\(call.id)" {
+                    return row.id
+                }
+                if let result, eventID == "toolResult:\(result.id)" {
+                    return row.id
+                }
+            }
+        }
+        return eventID
     }
 
     static func groupingToolResults(in events: [SessionEvent]) -> [DisplayedSessionRow] {

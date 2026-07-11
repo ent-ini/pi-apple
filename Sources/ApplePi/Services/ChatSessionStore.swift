@@ -74,6 +74,13 @@ final class ChatSession: ObservableObject, Identifiable {
     private var transientAssistantEvent: SessionEvent?
     private var transientStreamEvents: [SessionEvent] = []
     private var displayOrderByEventID: [String: Double] = [:]
+    private var loadedPersistedLineRanges: [ClosedRange<Int>] = []
+    private var transientReconciliationMinimumLineByEventID: [String: Int] = [:]
+    /// Once a persisted row reconciles a transient row, reserve that row for
+    /// this send. Rebuilding the visible list must not let another identical
+    /// transient row claim the same persisted replacement.
+    private var claimedPersistedReconciliationIDs: Set<String> = []
+    private var currentSendReconciliationMinimumLineIndex: Int = 0
     private var nextAppendDisplayOrder: Double = 0
     private var nextPrependDisplayOrder: Double = -1
     private var didAbortCurrentSend = false
@@ -181,6 +188,10 @@ final class ChatSession: ObservableObject, Identifiable {
         self.eventLoader = eventLoader
         self.historyPageLoader = historyPageLoader
         self.launchRequest = nil
+        self.loadedPersistedLineRanges = []
+        self.transientReconciliationMinimumLineByEventID = [:]
+        self.claimedPersistedReconciliationIDs = []
+        self.currentSendReconciliationMinimumLineIndex = 0
         self.hasEarlierHistory = false
         self.isLoadingEarlierHistory = false
         self.isAwaitingTurnCommit = false
@@ -210,6 +221,8 @@ final class ChatSession: ObservableObject, Identifiable {
         canAcceptSteering = true
         statusMessage = "Thinking..."
         retainCurrentTransientTranscript()
+        currentSendReconciliationMinimumLineIndex = max(lastPersistedLineIndex + 1, 0)
+        claimedPersistedReconciliationIDs = []
 
         var content: [ContentBlock] = attachments.map { attachment in
             switch attachment.kind {
@@ -229,7 +242,7 @@ final class ChatSession: ObservableObject, Identifiable {
             content.append(.text(prompt))
         }
 
-        transientUserEvent = .message(
+        let userEvent = SessionEvent.message(
             Message(
                 id: UUID().uuidString,
                 role: .user,
@@ -240,6 +253,8 @@ final class ChatSession: ObservableObject, Identifiable {
             ),
             lineIndex: Self.transientUserLineIndex
         )
+        transientUserEvent = userEvent
+        recordTransientReconciliationFloor(for: userEvent)
         transientAssistantEvent = .message(
             Message(
                 id: UUID().uuidString,
@@ -268,12 +283,15 @@ final class ChatSession: ObservableObject, Identifiable {
                     message,
                     lineIndex: nextTransientLineIndex(for: nextStreamEvents.count)
                 )
+                recordTransientReconciliationFloor(for: transientEvent)
                 upsertTransientStreamEvent(transientEvent, into: &nextStreamEvents)
             case .toolCall(let call, _):
                 let transientEvent = SessionEvent.toolCall(call, lineIndex: nextTransientLineIndex(for: nextStreamEvents.count))
+                recordTransientReconciliationFloor(for: transientEvent)
                 upsertTransientStreamEvent(transientEvent, into: &nextStreamEvents)
             case .toolResult(let result, _):
                 let transientEvent = SessionEvent.toolResult(result, lineIndex: nextTransientLineIndex(for: nextStreamEvents.count))
+                recordTransientReconciliationFloor(for: transientEvent)
                 upsertTransientStreamEvent(transientEvent, into: &nextStreamEvents)
             case .meta, .other:
                 continue
@@ -346,6 +364,7 @@ final class ChatSession: ObservableObject, Identifiable {
             ),
             lineIndex: nextTransientLineIndex(for: transientStreamEvents.count)
         )
+        recordTransientReconciliationFloor(for: event)
         upsertTransientStreamEvent(event, into: &transientStreamEvents)
         statusMessage = "Steering..."
         rebuildEvents()
@@ -374,6 +393,7 @@ final class ChatSession: ObservableObject, Identifiable {
             ),
             lineIndex: nextTransientLineIndex(for: transientStreamEvents.count)
         )
+        recordTransientReconciliationFloor(for: event)
         transientStreamEvents.append(event)
     }
 
@@ -422,7 +442,9 @@ final class ChatSession: ObservableObject, Identifiable {
             if case .other(let type, _) = event { return type == "abort" }
             return false
         }) {
-            transientStreamEvents.append(.other(type: "abort", lineIndex: nextTransientLineIndex(for: transientStreamEvents.count)))
+            let event = SessionEvent.other(type: "abort", lineIndex: nextTransientLineIndex(for: transientStreamEvents.count))
+            recordTransientReconciliationFloor(for: event)
+            transientStreamEvents.append(event)
         }
     }
 
@@ -466,33 +488,26 @@ final class ChatSession: ObservableObject, Identifiable {
             rebuildEvents()
             statusMessage = "\(persistedEvents.count) events"
         }
+        recordLoadedRange(from: page, preservingExisting: true)
+        refreshHasEarlierHistory()
         if page.hasMoreBefore, !page.events.isEmpty {
-            // `hasMoreBefore` is relative to the returned page, not necessarily
-            // to the transcript window already visible in the app. Delta polls
-            // use `after=<lastPersistedLineIndex>`; pi-appd correctly reports
-            // `hasMoreBefore = true` for those pages because earlier JSONL rows
-            // exist before the delta, but those rows may already be loaded. Do
-            // not turn on the "Load earlier messages" affordance for a pure
-            // append page that starts after our current first visible row.
             let pageStartsAfterVisibleWindow = previousFirstLineIndex.map { previousFirstLine in
                 page.firstLine.map { $0 > previousFirstLine } ?? false
             } ?? false
             DiagnosticsLogBuffer.shared.append(
-                level: pageStartsAfterVisibleWindow ? "debug" : "info",
+                level: pageStartsAfterVisibleWindow && nextHistoryLoadBeforeLineIndex == nil ? "debug" : "info",
                 category: "session.history",
-                message: pageStartsAfterVisibleWindow ? "Ignored delta hasMoreBefore for already-loaded history" : "Page exposed earlier history",
+                message: pageStartsAfterVisibleWindow && nextHistoryLoadBeforeLineIndex == nil ? "Ignored delta hasMoreBefore for already-loaded history" : "Page exposed recoverable earlier history",
                 metadata: [
                     "session": title,
                     "sessionID": sessionID ?? "",
                     "previousFirstLine": previousFirstLineIndex.map(String.init) ?? "",
                     "pageFirstLine": page.firstLine.map(String.init) ?? "",
                     "pageLastLine": page.lastLine.map(String.init) ?? "",
-                    "events": String(page.events.count)
+                    "events": String(page.events.count),
+                    "nextBefore": nextHistoryLoadBeforeLineIndex.map(String.init) ?? ""
                 ]
             )
-            if !pageStartsAfterVisibleWindow {
-                hasEarlierHistory = true
-            }
         }
         return didUpdateTitle
     }
@@ -502,13 +517,13 @@ final class ChatSession: ObservableObject, Identifiable {
               !isLoadingEarlierHistory,
               !isLoading else { return }
 
-        let before = firstPersistedLineIndex
-        guard before > 0 else {
+        guard let before = nextHistoryLoadBeforeLineIndex,
+              before > 0 else {
             hasEarlierHistory = false
             return
         }
 
-        let anchorEventID = preserveVisiblePosition ? persistedEvents.first(where: \.isVisibleInTranscript)?.id : nil
+        let anchorEventID = preserveVisiblePosition ? historyAnchorEventID(forLoadingBefore: before) : nil
         logHistoryStateChange("Loading earlier history", extra: ["before": String(before), "limit": String(limit), "preserveVisiblePosition": String(preserveVisiblePosition)])
         isLoadingEarlierHistory = true
         loadError = nil
@@ -519,7 +534,7 @@ final class ChatSession: ObservableObject, Identifiable {
                 await MainActor.run {
                     guard let self else { return }
                     defer { self.isLoadingEarlierHistory = false }
-                    guard self.firstPersistedLineIndex == before else { return }
+                    guard self.historyLoadBoundaryStillValid(before) else { return }
                     self.logHistoryStateChange(
                         "Earlier history page loaded",
                         extra: [
@@ -594,11 +609,13 @@ final class ChatSession: ObservableObject, Identifiable {
                 statusMessage = "Session is not backed by a file yet."
                 finishLoad(completionGeneration: completionGeneration)
             case .loaded(let page, let modificationDate):
+                let preservesLoadedWindow = shouldPreserveLoadedWindow(whenReloading: page)
                 let reloadedEvents = reloadedPersistedEvents(from: page)
                 inheritDisplayOrdersForPersistedEvents(reloadedEvents)
                 assignMissingDisplayOrders(to: reloadedEvents)
                 persistedEvents = reloadedEvents
-                hasEarlierHistory = hasEarlierHistoryAvailable(afterReloading: page)
+                recordLoadedRange(from: page, preservingExisting: preservesLoadedWindow)
+                refreshHasEarlierHistory()
                 updateTitleFromSessionMetadata(in: page.events)
                 reconcileTransientEvents(with: persistedEvents)
                 rebuildEvents()
@@ -680,7 +697,7 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private func reloadedPersistedEvents(from page: SessionEventsPage) -> [SessionEvent] {
-        guard hasLoadedOnce, page.hasMoreBefore || page.hasMoreAfter else {
+        guard shouldPreserveLoadedWindow(whenReloading: page) else {
             return page.events
         }
 
@@ -720,14 +737,72 @@ final class ChatSession: ObservableObject, Identifiable {
         return merged
     }
 
-    private func hasEarlierHistoryAvailable(afterReloading page: SessionEventsPage) -> Bool {
-        guard hasLoadedOnce, page.hasMoreBefore || page.hasMoreAfter else {
-            return page.hasMoreBefore
+    private func shouldPreserveLoadedWindow(whenReloading page: SessionEventsPage) -> Bool {
+        hasLoadedOnce && (page.hasMoreBefore || page.hasMoreAfter)
+    }
+
+    private func recordLoadedRange(from page: SessionEventsPage, preservingExisting: Bool) {
+        guard let firstLine = page.firstLine,
+              let lastLine = page.lastLine else {
+            if !preservingExisting {
+                loadedPersistedLineRanges = []
+            }
+            return
         }
-        guard let firstLine = persistedEvents.first?.lineIndex else {
-            return page.hasMoreBefore
+        let range = min(firstLine, lastLine)...max(firstLine, lastLine)
+        if preservingExisting {
+            loadedPersistedLineRanges = mergedLineRanges(loadedPersistedLineRanges + [range])
+        } else {
+            loadedPersistedLineRanges = [range]
         }
-        return firstLine > 0
+    }
+
+    private func mergedLineRanges(_ ranges: [ClosedRange<Int>]) -> [ClosedRange<Int>] {
+        let sorted = ranges.sorted { lhs, rhs in
+            if lhs.lowerBound != rhs.lowerBound { return lhs.lowerBound < rhs.lowerBound }
+            return lhs.upperBound < rhs.upperBound
+        }
+        var merged: [ClosedRange<Int>] = []
+        for range in sorted {
+            guard let last = merged.last else {
+                merged.append(range)
+                continue
+            }
+            if range.lowerBound <= last.upperBound + 1 {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    private var nextHistoryLoadBeforeLineIndex: Int? {
+        let ranges = loadedPersistedLineRanges
+        guard !ranges.isEmpty else { return firstPersistedLineIndex > 0 ? firstPersistedLineIndex : nil }
+        for index in ranges.indices.dropFirst() {
+            let previous = ranges[ranges.index(before: index)]
+            let current = ranges[index]
+            if current.lowerBound > previous.upperBound + 1 {
+                return current.lowerBound
+            }
+        }
+        let firstLine = ranges[0].lowerBound
+        return firstLine > 0 ? firstLine : nil
+    }
+
+    private func refreshHasEarlierHistory() {
+        hasEarlierHistory = nextHistoryLoadBeforeLineIndex != nil
+    }
+
+    private func historyLoadBoundaryStillValid(_ before: Int) -> Bool {
+        nextHistoryLoadBeforeLineIndex == before || before == firstPersistedLineIndex
+    }
+
+    private func historyAnchorEventID(forLoadingBefore before: Int) -> String? {
+        persistedEvents.first { event in
+            event.isVisibleInTranscript && event.lineIndex >= before
+        }?.id ?? persistedEvents.first(where: \.isVisibleInTranscript)?.id
     }
 
     private func assignMissingDisplayOrders(to events: [SessionEvent]) {
@@ -742,6 +817,48 @@ final class ChatSession: ObservableObject, Identifiable {
             displayOrderByEventID[event.id] = nextPrependDisplayOrder
             nextPrependDisplayOrder -= 1
         }
+    }
+
+    private func assignHistoryDisplayOrders(to events: [SessionEvent], page: SessionEventsPage) {
+        guard !events.isEmpty else { return }
+        if let pageLastLine = page.lastLine,
+           let existingFirstLine = persistedEvents.first?.lineIndex,
+           pageLastLine < existingFirstLine {
+            assignPrependedDisplayOrders(to: events)
+            return
+        }
+
+        guard let previousOrder = nearestDisplayOrder(before: page.firstLine),
+              let nextOrder = nearestDisplayOrder(after: page.lastLine),
+              previousOrder < nextOrder else {
+            assignMissingDisplayOrders(to: events)
+            return
+        }
+
+        let orderedEvents = events.sorted { lhs, rhs in
+            if lhs.lineIndex != rhs.lineIndex { return lhs.lineIndex < rhs.lineIndex }
+            return lhs.id < rhs.id
+        }
+        let step = (nextOrder - previousOrder) / Double(orderedEvents.count + 1)
+        for (offset, event) in orderedEvents.enumerated() where displayOrderByEventID[event.id] == nil {
+            displayOrderByEventID[event.id] = previousOrder + (Double(offset + 1) * step)
+        }
+    }
+
+    private func nearestDisplayOrder(before lineIndex: Int?) -> Double? {
+        guard let lineIndex else { return nil }
+        return persistedEvents
+            .filter { $0.lineIndex < lineIndex }
+            .max(by: { $0.lineIndex < $1.lineIndex })
+            .flatMap { displayOrderByEventID[$0.id] }
+    }
+
+    private func nearestDisplayOrder(after lineIndex: Int?) -> Double? {
+        guard let lineIndex else { return nil }
+        return persistedEvents
+            .filter { $0.lineIndex > lineIndex }
+            .min(by: { $0.lineIndex < $1.lineIndex })
+            .flatMap { displayOrderByEventID[$0.id] }
     }
 
     private func inheritDisplayOrdersForPersistedEvents(_ persisted: [SessionEvent]) {
@@ -767,9 +884,12 @@ final class ChatSession: ObservableObject, Identifiable {
 
     private func transientEvent(_ transient: SessionEvent, matchesPersistedReplacement persisted: SessionEvent) -> Bool {
         switch (transient, persisted) {
-        case (.message(let transientMessage, _), .message(let persistedMessage, _)):
+        case (.message(let transientMessage, _), .message(let persistedMessage, let persistedLineIndex)):
             guard transientMessage.role == persistedMessage.role else { return false }
             if transientMessage.id == persistedMessage.id { return true }
+            guard canUseContentFallback(forTransient: transient, persistedLineIndex: persistedLineIndex) else {
+                return false
+            }
             let transientSignature = messageSignature(for: transientMessage)
             let persistedSignature = messageSignature(for: persistedMessage)
             if !transientSignature.isEmpty, transientSignature == persistedSignature {
@@ -791,8 +911,10 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private var visibleTransientEvents: [SessionEvent] {
-        (retainedTransientEvents + [transientUserEvent].compactMap { $0 } + transientStreamEvents)
-            .filter { shouldDisplayTransientEvent($0) }
+        unpersistedTransientEvents(
+            retainedTransientEvents + [transientUserEvent].compactMap { $0 } + transientStreamEvents,
+            against: persistedEvents
+        )
     }
 
     private func retainCurrentTransientTranscript() {
@@ -802,6 +924,36 @@ final class ChatSession: ObservableObject, Identifiable {
         for event in current where !retainedTransientEvents.contains(where: { $0.id == event.id }) {
             retainedTransientEvents.append(event)
         }
+    }
+
+    private func unpersistedTransientEvents(_ transientEvents: [SessionEvent], against persisted: [SessionEvent]) -> [SessionEvent] {
+        var usedPersistedIDs = claimedPersistedReconciliationIDs
+        var unpersisted: [SessionEvent] = []
+        unpersisted.reserveCapacity(transientEvents.count)
+
+        for event in transientEvents {
+            if let match = persisted.first(where: { persistedEvent in
+                guard !usedPersistedIDs.contains(persistedEvent.id) else { return false }
+                return transientEvent(event, matchesPersistedReplacement: persistedEvent)
+            }) {
+                usedPersistedIDs.insert(match.id)
+                claimedPersistedReconciliationIDs.insert(match.id)
+            } else {
+                unpersisted.append(event)
+            }
+        }
+        return unpersisted
+    }
+
+    private func recordTransientReconciliationFloor(for event: SessionEvent) {
+        transientReconciliationMinimumLineByEventID[event.id] = currentSendReconciliationMinimumLineIndex
+    }
+
+    private func canUseContentFallback(forTransient transient: SessionEvent, persistedLineIndex: Int) -> Bool {
+        guard let minimumLineIndex = transientReconciliationMinimumLineByEventID[transient.id] else {
+            return true
+        }
+        return persistedLineIndex >= minimumLineIndex
     }
 
     private func shouldDisplayTransientEvent(_ transientEvent: SessionEvent) -> Bool {
@@ -827,14 +979,15 @@ final class ChatSession: ObservableObject, Identifiable {
     private func prependPersistedPage(_ page: SessionEventsPage, anchorEventID: String?) {
         let existingIDs = Set(persistedEvents.map(\.id))
         let filtered = page.events.filter { !existingIDs.contains($0.id) }
+        recordLoadedRange(from: page, preservingExisting: true)
         guard !filtered.isEmpty else {
-            hasEarlierHistory = page.hasMoreBefore
+            refreshHasEarlierHistory()
             return
         }
         pendingHistoryAnchorEventID = anchorEventID
-        assignPrependedDisplayOrders(to: filtered)
+        assignHistoryDisplayOrders(to: filtered, page: page)
         persistedEvents = mergePersistedEvents(persistedEvents, withFreshPage: filtered)
-        hasEarlierHistory = page.hasMoreBefore
+        refreshHasEarlierHistory()
         reconcileTransientEvents(with: persistedEvents)
         rebuildEvents()
         historyRevision &+= 1
@@ -850,12 +1003,8 @@ final class ChatSession: ObservableObject, Identifiable {
            latestPersistedMessage(matches: transientAssistantEvent, in: persisted) {
             self.transientAssistantEvent = nil
         }
-        retainedTransientEvents.removeAll { event in
-            transientEventIsPersisted(event, in: persisted)
-        }
-        transientStreamEvents.removeAll { event in
-            transientEventIsPersisted(event, in: persisted)
-        }
+        retainedTransientEvents = unpersistedTransientEvents(retainedTransientEvents, against: persisted)
+        transientStreamEvents = unpersistedTransientEvents(transientStreamEvents, against: persisted)
     }
 
     func markTurnOutputComplete() {
@@ -903,10 +1052,7 @@ final class ChatSession: ObservableObject, Identifiable {
         let matches: (SessionEvent) -> Bool = {
             switch (event, $0) {
             case (.message(let lhs, _), .message(let rhs, _)):
-                if lhs.id == rhs.id { return true }
-                return lhs.role == rhs.role
-                    && !self.messageSignature(for: lhs).isEmpty
-                    && self.messageSignature(for: lhs) == self.messageSignature(for: rhs)
+                return lhs.id == rhs.id
             case (.toolCall(let lhs, _), .toolCall(let rhs, _)):
                 return lhs.id == rhs.id
             case (.toolResult(let lhs, _), .toolResult(let rhs, _)):
@@ -956,33 +1102,18 @@ final class ChatSession: ObservableObject, Identifiable {
                 return true
             }
 
+            guard canUseContentFallback(forTransient: transientEvent, persistedLineIndex: lineIndex) else {
+                return false
+            }
+
             let persistedSignature = messageSignature(for: persistedMessage)
             if !transientSignature.isEmpty,
-               transientSignature == persistedSignature,
-               (messageTimestampsAreClose(transientMessage, persistedMessage) || transientMessage.role == .assistant) {
+               transientSignature == persistedSignature {
                 return true
             }
 
-            guard persistedMessage.content == transientMessage.content else {
-                return false
-            }
-            if messageTimestampsAreClose(transientMessage, persistedMessage) || transientMessage.role == .assistant {
-                return true
-            }
-            guard let transientParent = transientMessage.parentId?.nilIfBlank,
-                  let persistedParent = persistedMessage.parentId?.nilIfBlank else {
-                return false
-            }
-            return transientParent == persistedParent
+            return persistedMessage.content == transientMessage.content
         }
-    }
-
-    private func messageTimestampsAreClose(_ lhs: Message, _ rhs: Message) -> Bool {
-        guard let lhsTimestamp = lhs.timestamp,
-              let rhsTimestamp = rhs.timestamp else {
-            return false
-        }
-        return abs(rhsTimestamp.timeIntervalSince(lhsTimestamp)) < 30
     }
 
     private func messageSignature(for message: Message) -> String {

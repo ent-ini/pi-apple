@@ -4140,8 +4140,8 @@ func xmlEscape(value string) string {
 // runtime_changed) so the client does not have to reparse the whole
 // catalog on every change.
 //
-// Sends are non-blocking: a slow client that cannot keep up simply misses
-// intermediate events and receives the most recent snapshot on reconnect.
+// Sends are non-blocking. A slow client is disconnected instead of silently
+// dropping deltas; clients reconnect and receive a fresh full snapshot.
 type catalogBroker struct {
 	mu          sync.RWMutex
 	broadcastMu sync.Mutex
@@ -4177,12 +4177,17 @@ func (b *catalogBroker) unsubscribe(ch chan streamEvent) {
 func (b *catalogBroker) broadcast(event streamEvent) {
 	b.broadcastMu.Lock()
 	defer b.broadcastMu.Unlock()
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for ch := range b.subscribers {
 		select {
 		case ch <- event:
 		default:
+			// Do not let a client retain a stale catalog indefinitely. Closing the
+			// channel ends its SSE handler; both Apple clients reconnect and get
+			// a full snapshot as their first event.
+			delete(b.subscribers, ch)
+			close(ch)
 		}
 	}
 }
