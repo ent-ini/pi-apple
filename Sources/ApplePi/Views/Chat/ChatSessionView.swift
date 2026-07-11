@@ -15,7 +15,9 @@ struct ChatSessionView: View {
     @State private var transcriptionTask: Task<Void, Never>?
     @State private var showMicrophonePermissionAlert = false
     @State private var showsModelPicker = false
+    @State private var showsThinkingPicker = false
     @State private var modelPickerButtonFrame: CGRect = .zero
+    @State private var thinkingPickerButtonFrame: CGRect = .zero
     @StateObject private var audioRecorder = AudioRecordingController()
 
     private let attachmentStagingService = AttachmentStagingService()
@@ -80,10 +82,19 @@ struct ChatSessionView: View {
                         .zIndex(20)
                         .transition(.opacity)
                 }
+
+                if showsThinkingPicker {
+                    thinkingPickerOverlay(containerSize: proxy.size)
+                        .zIndex(20)
+                        .transition(.opacity)
+                }
             }
             .coordinateSpace(name: Self.modelPickerCoordinateSpace)
             .onPreferenceChange(ModelPickerButtonFramePreferenceKey.self) { frame in
                 modelPickerButtonFrame = frame
+            }
+            .onPreferenceChange(ThinkingPickerButtonFramePreferenceKey.self) { frame in
+                thinkingPickerButtonFrame = frame
             }
         }
         .onAppear {
@@ -193,6 +204,7 @@ struct ChatSessionView: View {
                     appState.refreshAvailableModels(for: session, force: true)
                 }
                 withAnimation(.snappy(duration: 0.18)) {
+                    showsThinkingPicker = false
                     showsModelPicker.toggle()
                 }
             } label: {
@@ -203,24 +215,25 @@ struct ChatSessionView: View {
             .background(ModelPickerButtonFrameReader())
             .zIndex(5)
 
-            Menu {
-                ForEach(appState.availableThinkingLevels(in: session), id: \.self) { level in
-                    Button {
-                        showsModelPicker = false
-                        appState.selectThinkingLevel(level, in: session)
-                    } label: {
-                        if level == displayedThinkingLevel {
-                            Label(level, systemImage: "checkmark")
-                        } else {
-                            Text(level)
-                        }
-                    }
+            Button {
+                if session.availableModels.isEmpty {
+                    appState.refreshAvailableModels(for: session, force: true)
+                }
+                withAnimation(.snappy(duration: 0.18)) {
+                    showsModelPicker = false
+                    showsThinkingPicker.toggle()
                 }
             } label: {
-                inlineStatusButton(title: thinkingControlTitle, showsChevron: true)
+                inlineStatusButton(
+                    title: thinkingControlTitle,
+                    showsChevron: true,
+                    chevronExpanded: showsThinkingPicker
+                )
             }
-            .menuStyle(.borderlessButton)
+            .buttonStyle(.plain)
             .disabled(!canAdjustSessionOptions)
+            .background(ThinkingPickerButtonFrameReader())
+            .zIndex(5)
 
             Spacer(minLength: 0)
 
@@ -308,6 +321,54 @@ struct ChatSessionView: View {
                 .frame(width: width, height: height, alignment: .top)
                 .position(x: x + (width / 2), y: y + (height / 2))
                 .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottomTrailing)))
+        }
+    }
+
+    private var thinkingPickerIdealHeight: CGFloat {
+        let count = appState.availableThinkingLevels(in: session).count
+        return max(52, 16 + CGFloat(count * 30))
+    }
+
+    private func thinkingPickerOverlay(containerSize: CGSize) -> some View {
+        let margin = Self.modelPickerMargin
+        let width = min(Self.modelPickerWidth, max(240, containerSize.width - (margin * 2)))
+        let hasButtonFrame = !thinkingPickerButtonFrame.isEmpty
+        let availableAboveButton = hasButtonFrame
+            ? max(160, thinkingPickerButtonFrame.minY - (margin * 2))
+            : max(160, containerSize.height - 80)
+        let height = min(thinkingPickerIdealHeight, availableAboveButton)
+        let x = hasButtonFrame
+            ? min(max(margin, thinkingPickerButtonFrame.maxX - width), max(margin, containerSize.width - width - margin))
+            : max(margin, containerSize.width - width - margin)
+        let y = hasButtonFrame
+            ? max(margin, thinkingPickerButtonFrame.minY - height - Self.modelPickerGap)
+            : max(margin, containerSize.height - height - 56)
+
+        return ZStack(alignment: .topLeading) {
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(width: containerSize.width, height: containerSize.height)
+                .onTapGesture {
+                    withAnimation(.snappy(duration: 0.16)) {
+                        showsThinkingPicker = false
+                    }
+                }
+
+            ThinkingPickerDropdown(
+                levels: appState.availableThinkingLevels(in: session),
+                currentLevel: displayedThinkingLevel,
+                accentColor: appState.appearance.accentColor,
+                maxHeight: height,
+                onSelect: { level in
+                    withAnimation(.snappy(duration: 0.18)) {
+                        showsThinkingPicker = false
+                    }
+                    appState.selectThinkingLevel(level, in: session)
+                }
+            )
+            .frame(width: width, height: height, alignment: .top)
+            .position(x: x + (width / 2), y: y + (height / 2))
+            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottomTrailing)))
         }
     }
 
@@ -749,6 +810,28 @@ private struct ModelPickerButtonFrameReader: View {
     }
 }
 
+private struct ThinkingPickerButtonFramePreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isEmpty {
+            value = next
+        }
+    }
+}
+
+private struct ThinkingPickerButtonFrameReader: View {
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: ThinkingPickerButtonFramePreferenceKey.self,
+                value: proxy.frame(in: .named(ChatSessionView.modelPickerCoordinateSpace))
+            )
+        }
+    }
+}
+
 private struct ModelPickerDropdown: View {
     let groupedModels: [ModelGroup]
     let accentColor: Color
@@ -791,6 +874,77 @@ private struct ModelPickerDropdown: View {
                 .stroke(Color.primary.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
+    }
+}
+
+private struct ThinkingPickerDropdown: View {
+    let levels: [String]
+    let currentLevel: String
+    let accentColor: Color
+    let maxHeight: CGFloat
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                if levels.isEmpty {
+                    Text("Loading thinking levels…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                } else {
+                    ForEach(levels, id: \.self) { level in
+                        ThinkingPickerRow(
+                            level: level,
+                            isSelected: level == currentLevel,
+                            accentColor: accentColor,
+                            onSelect: onSelect
+                        )
+                    }
+                }
+            }
+            .padding(8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxHeight: maxHeight, alignment: .top)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.regularMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
+    }
+}
+
+private struct ThinkingPickerRow: View {
+    let level: String
+    let isSelected: Bool
+    let accentColor: Color
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        Button {
+            onSelect(level)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark" : "circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isSelected ? AnyShapeStyle(accentColor) : AnyShapeStyle(.tertiary))
+                    .frame(width: 14)
+                Text(level)
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(isSelected ? AnyShapeStyle(accentColor) : AnyShapeStyle(.primary))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
