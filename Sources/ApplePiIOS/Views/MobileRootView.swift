@@ -2747,9 +2747,27 @@ private struct MobileModelList: View {
     let selectedID: String?
     let emptyMessage: String
     let includesDaemonDefault: Bool
-    let defaultSelectionTitle: String = "Use daemon default"
+    let defaultSelectionTitle: String
     let onSelectDefault: (() -> Void)?
     let onSelectModel: (PiModelOption) -> Void
+
+    init(
+        models: [PiModelOption],
+        selectedID: String?,
+        emptyMessage: String,
+        includesDaemonDefault: Bool,
+        defaultSelectionTitle: String = "Use daemon default",
+        onSelectDefault: (() -> Void)?,
+        onSelectModel: @escaping (PiModelOption) -> Void
+    ) {
+        self.models = models
+        self.selectedID = selectedID
+        self.emptyMessage = emptyMessage
+        self.includesDaemonDefault = includesDaemonDefault
+        self.defaultSelectionTitle = defaultSelectionTitle
+        self.onSelectDefault = onSelectDefault
+        self.onSelectModel = onSelectModel
+    }
 
     var body: some View {
         ScrollView {
