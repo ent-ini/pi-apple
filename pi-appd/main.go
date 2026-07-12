@@ -1963,10 +1963,14 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 		}
 
 		if isImageAttachment {
+			visionData, visionMIME, visionErr := prepareVisionImage(attachment.Path, attachment.MimeType, data)
+			if visionErr != nil {
+				return rpcPromptCommand{}, visionErr
+			}
 			images = append(images, rpcImageContent{
 				Type:     "image",
-				Data:     base64.StdEncoding.EncodeToString(data),
-				MimeType: attachment.MimeType,
+				Data:     base64.StdEncoding.EncodeToString(visionData),
+				MimeType: visionMIME,
 			})
 			prefix.WriteString("<file name=\"")
 			prefix.WriteString(xmlEscape(attachment.Path))
@@ -2004,6 +2008,55 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 		Message: message,
 		Images:  images,
 	}, nil
+}
+
+// prepareVisionImage converts HEIC/HEIF only for providers' vision payload.
+// The original upload, checksum and MinIO object are intentionally untouched.
+func prepareVisionImage(path string, mimeType string, data []byte) ([]byte, string, error) {
+	if !isHEICImage(path, mimeType) {
+		return data, mimeType, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// ImageMagick is available on the daemon host with libheif. Resource and
+	// dimension limits prevent a phone image or malformed file from exhausting it.
+	cmd := exec.CommandContext(ctx, "convert",
+		"-limit", "memory", "256MiB",
+		"-limit", "map", "512MiB",
+		"-limit", "disk", "1GiB",
+		path+"[0]", "-auto-orient", "-resize", "4096x4096>", "-strip", "-quality", "90", "jpeg:-",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, "", errors.New("HEIC conversion is unavailable")
+	}
+	jpeg, readErr := io.ReadAll(io.LimitReader(stdout, maxImageAttachmentBytes+1))
+	waitErr := cmd.Wait()
+	if readErr != nil || waitErr != nil || len(jpeg) == 0 {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = "conversion failed"
+		}
+		return nil, "", errors.New("could not convert HEIC image to JPEG: " + message)
+	}
+	if int64(len(jpeg)) > maxImageAttachmentBytes {
+		return nil, "", errors.New("converted image is too large")
+	}
+	return jpeg, "image/jpeg", nil
+}
+
+func isHEICImage(path string, mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if mimeType == "image/heic" || mimeType == "image/heif" {
+		return true
+	}
+	extension := strings.ToLower(filepath.Ext(path))
+	return extension == ".heic" || extension == ".heif"
 }
 
 func (s *server) resolveAttachmentPaths(attachments []attachmentReference) ([]attachmentReference, error) {

@@ -1593,11 +1593,7 @@ private struct MessageBubble: View {
             EmptyView()
         case .image(let path, let mime):
             bubbleSurface(isLastVisibleBlock: isLastVisibleBlock) {
-                if let mime {
-                    Text("[image: \(path), \(mime)]")
-                } else {
-                    Text("[image: \(path)]")
-                }
+                MobileAttachmentImage(path: path, mimeType: mime)
             }
         }
     }
@@ -1702,6 +1698,52 @@ private struct MessageBubble: View {
     }()
 }
 
+private struct MobileAttachmentImage: View {
+    let path: String
+    let mimeType: String?
+
+    @State private var image: UIImage?
+    @State private var didFail = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 280, maxHeight: 340)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else if didFail {
+                Label("Image attachment", systemImage: "photo")
+                    .font(.subheadline)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 72, height: 56)
+            }
+        }
+        .task(id: path) {
+            await loadImage()
+        }
+    }
+
+    private func loadImage() async {
+        let data: Data?
+        if path.hasPrefix("data:"), let comma = path.firstIndex(of: ",") {
+            data = Data(base64Encoded: String(path[path.index(after: comma)...]))
+        } else if path.hasPrefix("/") {
+            // This is the staged file while a send is in flight. Persisted
+            // messages instead carry the base64 image block from the daemon.
+            data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        } else {
+            data = nil
+        }
+        guard !Task.isCancelled else { return }
+        image = data.flatMap(UIImage.init(data:))
+        didFail = image == nil
+    }
+}
+
 private enum MobileMessageTextSanitizer {
     static func visibleText(from text: String) -> String {
         let withoutSource = text.replacingOccurrences(
@@ -1735,11 +1777,8 @@ private enum MobileMessageTextSanitizer {
                 return visible.isEmpty ? nil : visible
             case .thinking:
                 return nil
-            case .image(let path, let mime):
-                if let mime {
-                    return "[image: \(path), \(mime)]"
-                }
-                return "[image: \(path)]"
+            case .image:
+                return "[image attachment]"
             }
         }
         return parts.joined(separator: "\n\n")
