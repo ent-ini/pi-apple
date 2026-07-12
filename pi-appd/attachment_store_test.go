@@ -56,6 +56,38 @@ func TestAttachmentStorePersistsOpaqueIDAndResolvesIt(t *testing.T) {
 	}
 }
 
+func TestOutboundAttachmentReferenceIsStoredOncePerMessage(t *testing.T) {
+	store := newAttachmentTestStore(t)
+	dir := filepath.Dir(store.localRoot)
+	artifactDir := filepath.Join(dir, "artifacts")
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(artifactDir, "report.txt")
+	if err := os.WriteFile(artifact, []byte("durable outbound file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{agentDir: dir, attachments: store}
+	raw := `{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"Ready: @artifacts/report.txt."}]}}`
+	session := sessionRecord{ID: "session-1", WorkingDirectory: dir}
+
+	first := srv.decorateOutboundAttachmentRecord(context.Background(), session, raw)
+	if !strings.Contains(first, `attachment-id=\"att_`) || strings.Contains(first, "@artifacts/report.txt") {
+		t.Fatalf("decorated record = %s", first)
+	}
+	second := srv.decorateOutboundAttachmentRecord(context.Background(), session, raw)
+	if first != second {
+		t.Fatalf("outbound decoration changed across replays:\nfirst: %s\nsecond: %s", first, second)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("attachments = %d, want one durable object", count)
+	}
+}
+
 func TestAttachmentContentRouteOnlyAcceptsOpaqueID(t *testing.T) {
 	store := newAttachmentTestStore(t)
 	record, err := store.Upload(context.Background(), bytes.NewBufferString("test data"), "report.txt", "text/plain")

@@ -155,6 +155,15 @@ CREATE TABLE IF NOT EXISTS attachment_refs (
  retain_until TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attachment_refs_attachment ON attachment_refs(attachment_id);
+CREATE TABLE IF NOT EXISTS outbound_attachment_refs (
+ session_id TEXT NOT NULL,
+ message_id TEXT NOT NULL,
+ source_path TEXT NOT NULL,
+ attachment_id TEXT NOT NULL REFERENCES attachments(id),
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(session_id, message_id, source_path)
+);
+CREATE INDEX IF NOT EXISTS outbound_attachment_refs_attachment ON outbound_attachment_refs(attachment_id);
 `)
 	return err
 }
@@ -296,6 +305,58 @@ func (s *attachmentStore) EnsureLocal(ctx context.Context, id string) (attachmen
 		return attachmentRecord{}, err
 	}
 	s.touch(ctx, id)
+	return record, nil
+}
+
+// ImportOutbound stores an assistant-authored local file exactly once for a
+// persisted session message. The binding keeps old chat history downloadable
+// even after the original workspace file changes or disappears.
+func (s *attachmentStore) ImportOutbound(ctx context.Context, sessionID, messageID, sourcePath string) (attachmentRecord, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	messageID = strings.TrimSpace(messageID)
+	sourcePath = filepath.Clean(strings.TrimSpace(sourcePath))
+	if sessionID == "" || messageID == "" || sourcePath == "." {
+		return attachmentRecord{}, errAttachmentNotFound
+	}
+
+	// Event pagination and SSE can request the same line concurrently. Keep the
+	// lookup/upload transaction serialized so a single @path creates one object.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var attachmentID string
+	err := s.db.QueryRowContext(ctx, `SELECT attachment_id FROM outbound_attachment_refs WHERE session_id=? AND message_id=? AND source_path=?`, sessionID, messageID, sourcePath).Scan(&attachmentID)
+	if err == nil {
+		return s.Get(ctx, attachmentID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return attachmentRecord{}, err
+	}
+
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return attachmentRecord{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return attachmentRecord{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return attachmentRecord{}, errors.New("outbound attachment is not a regular file")
+	}
+	if info.Size() > maxUploadFileBytes {
+		return attachmentRecord{}, errAttachmentTooLarge
+	}
+
+	record, err := s.Upload(ctx, file, filepath.Base(sourcePath), contentTypeForPath(sourcePath))
+	if err != nil {
+		return attachmentRecord{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO outbound_attachment_refs(session_id,message_id,source_path,attachment_id,created_at) VALUES (?,?,?,?,?)`, sessionID, messageID, sourcePath, record.ID, timestamp(time.Now().UTC())); err != nil {
+		return attachmentRecord{}, err
+	}
+	s.Bind(ctx, []attachmentReference{{ID: record.ID}}, sessionID)
 	return record, nil
 }
 

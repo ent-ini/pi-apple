@@ -356,6 +356,11 @@ private struct MacUserAttachmentView: View {
                     Text(displayName).font(.subheadline).lineLimit(2)
                     if isLoading { ProgressView().controlSize(.small) }
                     Spacer(minLength: 0)
+                    if case .image = attachment.kind {
+                        Button("Preview") { Task { await loadImagePreviewIfNeeded() } }
+                            .buttonStyle(.borderless)
+                            .disabled(isLoading)
+                    }
                     if attachment.attachmentID != nil {
                         Button("Open") { openAttachment() }.buttonStyle(.borderless)
                         Button("Save") { saveAttachment() }.buttonStyle(.borderless)
@@ -370,7 +375,6 @@ private struct MacUserAttachmentView: View {
         .padding(10)
         .background(Color.black.opacity(isUserMessage ? 0.12 : 0.05))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .task(id: attachment.id) { await loadImagePreviewIfNeeded() }
     }
 
     private var displayName: String {

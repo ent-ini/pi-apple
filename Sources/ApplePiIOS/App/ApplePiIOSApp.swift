@@ -424,7 +424,10 @@ final class MobilePiAppState: ObservableObject {
             let page = try await RemoteDaemonClient().loadSessionEventPage(
                 host: host,
                 sessionID: selectedSession.id,
-                limit: 120,
+                // Only the newest page is needed to enter a chat. Older
+                // records (and their attachment metadata) stay server-side
+                // until the user scrolls up.
+                limit: 40,
                 tokenOverride: daemonToken.nilIfBlank
             )
             guard self.selectedSession?.id == selectedSession.id,

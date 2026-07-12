@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -981,6 +982,7 @@ func (s *server) handleSessionEvents(w http.ResponseWriter, r *http.Request, rec
 	for i, line := range lines {
 		events = append(events, rawEventRecord{Line: start + i, Raw: line})
 	}
+	events = s.decorateOutboundAttachmentRecords(r.Context(), record, events)
 	page := pageRecord{HasMoreBefore: hasMoreBefore, HasMoreAfter: hasMoreAfter}
 	if len(events) > 0 {
 		page.FirstLine = events[0].Line
@@ -1039,7 +1041,7 @@ func (s *server) handleSessionEventStream(w http.ResponseWriter, r *http.Request
 			writeSSEError(w, flusher, err.Error())
 			return false
 		}
-		for _, event := range records {
+		for _, event := range s.decorateOutboundAttachmentRecords(r.Context(), record, records) {
 			if !writeSSE(w, flusher, "event", event) {
 				return false
 			}
@@ -2015,6 +2017,112 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 		Message: message,
 		Images:  images,
 	}, nil
+}
+
+var outboundFileReferencePattern = regexp.MustCompile(`(^|[[:space:]])@([^[:space:]]+)`)
+
+// decorateOutboundAttachmentRecords turns the documented @path marker in an
+// assistant response into the same opaque attachment markup used for inbound
+// uploads. The session JSONL stays unmodified; its immutable message ID plus
+// source path is bound in SQLite, so every later page/SSE replay returns the
+// same MinIO object without reading the source file again.
+func (s *server) decorateOutboundAttachmentRecords(ctx context.Context, session sessionRecord, events []rawEventRecord) []rawEventRecord {
+	if s.attachments == nil || len(events) == 0 {
+		return events
+	}
+	decorated := make([]rawEventRecord, len(events))
+	copy(decorated, events)
+	for index := range decorated {
+		decorated[index].Raw = s.decorateOutboundAttachmentRecord(ctx, session, decorated[index].Raw)
+	}
+	return decorated
+}
+
+func (s *server) decorateOutboundAttachmentRecord(ctx context.Context, session sessionRecord, raw string) string {
+	var event map[string]any
+	if json.Unmarshal([]byte(raw), &event) != nil || stringValue(event, "type") != "message" {
+		return raw
+	}
+	message, ok := event["message"].(map[string]any)
+	if !ok || stringValue(message, "role") != "assistant" {
+		return raw
+	}
+	messageID := stringValue(event, "id")
+	if messageID == "" {
+		return raw
+	}
+	content, ok := message["content"].([]any)
+	if !ok {
+		return raw
+	}
+	changed := false
+	for _, rawBlock := range content {
+		block, ok := rawBlock.(map[string]any)
+		if !ok || stringValue(block, "type") != "text" {
+			continue
+		}
+		text, ok := block["text"].(string)
+		if !ok || text == "" {
+			continue
+		}
+		if replacement, didReplace := s.replaceOutboundFileReferences(ctx, session, messageID, text); didReplace {
+			block["text"] = replacement
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func (s *server) replaceOutboundFileReferences(ctx context.Context, session sessionRecord, messageID, text string) (string, bool) {
+	matches := outboundFileReferencePattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text, false
+	}
+	var output strings.Builder
+	output.Grow(len(text))
+	last := 0
+	changed := false
+	for _, match := range matches {
+		// A marker needs a directory component; this deliberately ignores
+		// @mentions and makes @/absolute/path and @relative/path unambiguous.
+		candidate := text[match[4]:match[5]]
+		pathValue := strings.TrimRight(candidate, ".,;:!?»”’`*_~")
+		if pathValue == "" || !strings.Contains(pathValue, "/") {
+			continue
+		}
+		path, err := s.resolveFileReferencePath(pathValue, session.WorkingDirectory)
+		if err != nil {
+			continue
+		}
+		attachment, err := s.attachments.ImportOutbound(ctx, session.ID, messageID, path)
+		if err != nil {
+			continue
+		}
+		output.WriteString(text[last:match[0]])
+		output.WriteString(text[match[2]:match[3]]) // whitespace/start delimiter
+		output.WriteString(outboundAttachmentFileTag(attachment))
+		output.WriteString(candidate[len(pathValue):]) // retain prose punctuation
+		last = match[1]
+		changed = true
+	}
+	if !changed {
+		return text, false
+	}
+	output.WriteString(text[last:])
+	return output.String(), true
+}
+
+func outboundAttachmentFileTag(attachment attachmentRecord) string {
+	name := firstNonBlank(attachment.FileName, "attachment")
+	mimeType := firstNonBlank(attachment.MimeType, "application/octet-stream")
+	return `<file name="pi-attachment://` + xmlEscape(attachment.ID) + `/` + xmlEscape(name) + `" attachment-id="` + xmlEscape(attachment.ID) + `" attachment-name="` + xmlEscape(name) + `" attachment-mime="` + xmlEscape(mimeType) + `">[File attached: ` + xmlEscape(name) + `]</file>`
 }
 
 func writeAttachmentPromptAttributes(prefix *strings.Builder, attachment attachmentReference) {

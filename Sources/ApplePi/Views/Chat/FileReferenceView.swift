@@ -5,10 +5,21 @@ import ApplePiRemote
 
 struct ChatFileReference: Identifiable, Hashable, Sendable {
     let path: String
+    let attachmentID: String?
+    let attachmentName: String?
+    let mimeType: String?
 
-    var id: String { path }
+    init(path: String, attachmentID: String? = nil, attachmentName: String? = nil, mimeType: String? = nil) {
+        self.path = path
+        self.attachmentID = attachmentID
+        self.attachmentName = attachmentName
+        self.mimeType = mimeType
+    }
+
+    var id: String { attachmentID ?? path }
 
     var displayName: String {
+        if let attachmentName, !attachmentName.isEmpty { return attachmentName }
         let name = URL(fileURLWithPath: path).lastPathComponent
         return name.isEmpty ? path : name
     }
@@ -39,6 +50,7 @@ struct FileReferenceExtraction: Sendable {
 
 enum ChatFileReferenceExtractor {
     private static let referenceRegex = try? NSRegularExpression(pattern: #"@([^\s<>()\[\]{}\"'`]+)"#)
+    private static let attachmentTagRegex = try? NSRegularExpression(pattern: #"<file\s+name=\"([^\"]+)\"([^>]*)>[\s\S]*?</file>"#)
 
     static func extract(from rawText: String) -> FileReferenceExtraction {
         FileReferenceExtractionCache.shared.extraction(for: rawText) {
@@ -47,29 +59,45 @@ enum ChatFileReferenceExtractor {
     }
 
     private static func extractUncached(from rawText: String) -> FileReferenceExtraction {
-        guard let regex = referenceRegex else {
-            return FileReferenceExtraction(text: rawText, references: [])
-        }
-
-        let matches = regex.matches(in: rawText, range: NSRange(rawText.startIndex..., in: rawText))
-        guard !matches.isEmpty else {
-            return FileReferenceExtraction(text: rawText, references: [])
-        }
-
         var cleaned = rawText
         var references: [ChatFileReference] = []
 
-        for match in matches.reversed() {
-            guard let fullRange = Range(match.range(at: 0), in: cleaned),
-                  let pathRange = Range(match.range(at: 1), in: cleaned) else { continue }
-            let rawPath = String(cleaned[pathRange])
-            let trimmedPath = trimTrailingPunctuation(rawPath)
-            guard isLikelyFileReference(trimmedPath) else { continue }
+        // Parse ordinary @paths first. Replacing a later <file> tag first
+        // would invalidate the match offsets for a preceding @path.
+        if let referenceRegex {
+            let matches = referenceRegex.matches(in: cleaned, range: NSRange(cleaned.startIndex..., in: cleaned))
+            for match in matches.reversed() {
+                guard let fullRange = Range(match.range(at: 0), in: cleaned),
+                      let pathRange = Range(match.range(at: 1), in: cleaned) else { continue }
+                let rawPath = String(cleaned[pathRange])
+                let trimmedPath = trimTrailingPunctuation(rawPath)
+                guard isLikelyFileReference(trimmedPath) else { continue }
 
-            let reference = ChatFileReference(path: trimmedPath)
-            references.append(reference)
-            let consumedEnd = cleaned.index(fullRange.lowerBound, offsetBy: 1 + trimmedPath.count)
-            cleaned.replaceSubrange(fullRange.lowerBound..<consumedEnd, with: reference.displayName)
+                let reference = ChatFileReference(path: trimmedPath)
+                references.append(reference)
+                let consumedEnd = cleaned.index(fullRange.lowerBound, offsetBy: 1 + trimmedPath.count)
+                cleaned.replaceSubrange(fullRange.lowerBound..<consumedEnd, with: reference.displayName)
+            }
+        }
+
+        if let attachmentTagRegex {
+            let tagMatches = attachmentTagRegex.matches(in: cleaned, range: NSRange(cleaned.startIndex..., in: cleaned))
+            for match in tagMatches.reversed() {
+                guard let fullRange = Range(match.range(at: 0), in: cleaned),
+                      let pathRange = Range(match.range(at: 1), in: cleaned),
+                      let attributesRange = Range(match.range(at: 2), in: cleaned) else { continue }
+                let path = String(cleaned[pathRange])
+                let attributes = String(cleaned[attributesRange])
+                guard let attachmentID = attribute("attachment-id", in: attributes) else { continue }
+                let reference = ChatFileReference(
+                    path: path,
+                    attachmentID: attachmentID,
+                    attachmentName: attribute("attachment-name", in: attributes),
+                    mimeType: attribute("attachment-mime", in: attributes)
+                )
+                references.append(reference)
+                cleaned.replaceSubrange(fullRange, with: reference.displayName)
+            }
         }
 
         references.reverse()
@@ -77,6 +105,14 @@ enum ChatFileReferenceExtractor {
             text: normalize(cleaned),
             references: deduplicate(references)
         )
+    }
+
+    private static func attribute(_ name: String, in value: String) -> String? {
+        let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: name) + #"=\"([^\"]+)\""#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range(at: 1), in: value) else { return nil }
+        return String(value[range]).nilIfBlank
     }
 
     private static func trimTrailingPunctuation(_ value: String) -> String {
@@ -104,7 +140,7 @@ enum ChatFileReferenceExtractor {
     private static func deduplicate(_ references: [ChatFileReference]) -> [ChatFileReference] {
         var seen: Set<String> = []
         var unique: [ChatFileReference] = []
-        for reference in references where seen.insert(reference.path).inserted {
+        for reference in references where seen.insert(reference.id).inserted {
             unique.append(reference)
         }
         return unique
@@ -204,27 +240,6 @@ struct ChatFileReferenceCard: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
-        .onAppear(perform: loadInlinePreviewIfNeeded)
-    }
-
-    private func loadInlinePreviewIfNeeded() {
-        guard reference.isImage, previewImage == nil, !isLoadingPreview else { return }
-        isLoadingPreview = true
-        Task {
-            do {
-                let file = try await fetchFile()
-                let image = NSImage(data: file.data)
-                await MainActor.run {
-                    previewImage = image
-                    isLoadingPreview = false
-                }
-            } catch {
-                await MainActor.run {
-                    isLoadingPreview = false
-                    status = "Error: \(error.localizedDescription)"
-                }
-            }
-        }
     }
 
     private func preview() {
@@ -277,7 +292,10 @@ struct ChatFileReferenceCard: View {
     }
 
     private func fetchFile() async throws -> RemoteFileDownload {
-        try await RemoteDaemonClient().downloadFile(
+        if let attachmentID = reference.attachmentID {
+            return try await RemoteDaemonClient().downloadAttachment(host: appState.host, id: attachmentID)
+        }
+        return try await RemoteDaemonClient().downloadFile(
             host: appState.host,
             path: reference.path,
             baseDirectory: baseDirectory

@@ -1776,8 +1776,15 @@ private struct MobileTextAttachmentPresentation {
             }
         }
         let stripped = regex.stringByReplacingMatches(in: rawText, range: range, withTemplate: "")
-        return .init(text: MobileMessageTextSanitizer.visibleText(from: stripped), attachments: attachments)
+        let visible = MobileMessageTextSanitizer.visibleText(from: stripped)
+        // A file-only turn carries a transport fallback solely so Pi receives a
+        // non-empty prompt. It is not authored by the user and must never be
+        // rendered as chat text beside the file card.
+        let text = visible == attachmentOnlyFallbackPrompt ? "" : visible
+        return .init(text: text, attachments: attachments)
     }
+
+    private static let attachmentOnlyFallbackPrompt = "Please inspect the attached item(s)."
 
     private static func attribute(_ name: String, in value: String) -> String? {
         let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: name) + #"=\"([^\"]+)\""#
@@ -1849,6 +1856,7 @@ private struct MobileAttachmentImage: View {
 
     @State private var image: UIImage?
     @State private var didFail = false
+    @State private var requestedRemoteLoad = false
 
     var body: some View {
         Group {
@@ -1861,6 +1869,15 @@ private struct MobileAttachmentImage: View {
             } else if didFail {
                 Label("Image attachment", systemImage: "photo")
                     .font(.subheadline)
+            } else if isRemoteAttachment && !requestedRemoteLoad {
+                Button {
+                    requestedRemoteLoad = true
+                    Task { await loadImage() }
+                } label: {
+                    Label("Load image", systemImage: "photo")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.borderless)
             } else {
                 ProgressView()
                     .controlSize(.small)
@@ -1868,8 +1885,16 @@ private struct MobileAttachmentImage: View {
             }
         }
         .task(id: path) {
+            didFail = false
+            // A history page only contains metadata. Do not fetch MinIO image
+            // bytes until its card is explicitly opened by the user.
+            guard !isRemoteAttachment else { return }
             await loadImage()
         }
+    }
+
+    private var isRemoteAttachment: Bool {
+        Self.attachmentID(from: path) != nil
     }
 
     private func loadImage() async {
