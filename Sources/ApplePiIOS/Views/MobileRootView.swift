@@ -1062,13 +1062,15 @@ private struct MobileSessionDetailView: View {
 
     private func sendDraftToPi() {
         isComposerFocused = true
+        let promptToSend = appState.draft
         let attachmentsToSend = draftAttachments
         let submittedIDs = Set(attachmentsToSend.map(\.id))
         // Transfer ownership to the send operation synchronously. New chips
         // added while it runs stay in the composer and cannot be deleted by it.
         draftAttachments.removeAll { submittedIDs.contains($0.id) }
+        appState.draft = ""
         Task {
-            let outcome = await appState.sendDraft(attachments: attachmentsToSend)
+            let outcome = await appState.sendDraft(prompt: promptToSend, attachments: attachmentsToSend)
             switch outcome {
             case .submitted:
                 cleanupAttachments(attachmentsToSend)

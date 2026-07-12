@@ -749,8 +749,8 @@ final class MobilePiAppState: ObservableObject {
     }
 
     @discardableResult
-    func sendDraft(attachments: [ChatAttachment] = []) async -> MobileDraftSendOutcome {
-        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    func sendDraft(prompt rawPrompt: String, attachments: [ChatAttachment] = []) async -> MobileDraftSendOutcome {
+        let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !attachments.isEmpty else { return .uploadFailed }
         let effectivePrompt = prompt.isEmpty ? "Please inspect the attached item(s)." : prompt
         let initialSession = selectedSession
@@ -773,7 +773,6 @@ final class MobilePiAppState: ObservableObject {
             startedNewSession: startsNewSession
         )
         var operationFinished = false
-        draft = ""
         if startsNewSession {
             selectedPendingNewSessionSendID = operationID
             selectedRuntime = newSessionRuntimeForDisplay
