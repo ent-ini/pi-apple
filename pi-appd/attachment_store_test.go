@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newAttachmentTestStore(t *testing.T) *attachmentStore {
@@ -105,6 +106,61 @@ func TestAttachmentContentRouteOnlyAcceptsOpaqueID(t *testing.T) {
 	srv.handleUploadSubroutes(bad, httptest.NewRequest(http.MethodGet, "/uploads/../../etc/passwd/content", nil))
 	if bad.Code != http.StatusNotFound {
 		t.Fatalf("path traversal = %d", bad.Code)
+	}
+}
+
+func TestAttachmentStoreRejectsOversizedImageBeforePersistence(t *testing.T) {
+	store := newAttachmentTestStore(t)
+	data := make([]byte, maxImageAttachmentBytes+1)
+	copy(data, []byte("\x89PNG\r\n\x1a\n"))
+	_, err := store.Upload(context.Background(), bytes.NewReader(data), "large.png", "image/png")
+	if !errors.Is(err, errAttachmentTooLarge) {
+		t.Fatalf("Upload error = %v, want too large", err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("persisted oversized image rows = %d", count)
+	}
+}
+
+func TestAttachmentStoreRejectsSameSizeCorruptLocalCache(t *testing.T) {
+	store := newAttachmentTestStore(t)
+	record, err := store.Upload(context.Background(), strings.NewReader("good"), "test.txt", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record.LocalPath, []byte("evil"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnsureLocal(context.Background(), record.ID)
+	if !errors.Is(err, errAttachmentNotFound) {
+		t.Fatalf("EnsureLocal error = %v, want not found for corrupt cache", err)
+	}
+}
+
+func TestAttachmentAccessRenewsExpiry(t *testing.T) {
+	store := newAttachmentTestStore(t)
+	record, err := store.Upload(context.Background(), strings.NewReader("test"), "test.txt", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldExpiry := timestamp(time.Now().UTC().Add(-time.Hour))
+	if _, err := store.db.Exec(`UPDATE attachments SET expires_at=? WHERE id=?`, oldExpiry, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureLocal(context.Background(), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	var expiry string
+	if err := store.db.QueryRow(`SELECT expires_at FROM attachments WHERE id=?`, record.ID).Scan(&expiry); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, expiry)
+	if err != nil || !parsed.After(time.Now().UTC().Add(89*24*time.Hour)) {
+		t.Fatalf("expiry was not renewed: %q (%v)", expiry, err)
 	}
 }
 

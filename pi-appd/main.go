@@ -1732,7 +1732,13 @@ func (s *server) handleUploads(w http.ResponseWriter, r *http.Request) {
 		}
 		s.attachments = store
 	}
-	record, storeErr := s.attachments.Upload(r.Context(), file, header.Filename, header.Header.Get("Content-Type"))
+	originalName := header.Filename
+	if encodedName := strings.TrimSpace(r.Header.Get("X-Pi-Attachment-Name-B64")); encodedName != "" && len(encodedName) <= 4096 {
+		if decodedName, decodeErr := base64.StdEncoding.DecodeString(encodedName); decodeErr == nil && utf8.Valid(decodedName) && len(decodedName) <= 1024 {
+			originalName = string(decodedName)
+		}
+	}
+	record, storeErr := s.attachments.Upload(r.Context(), file, originalName, header.Header.Get("Content-Type"))
 	if storeErr != nil {
 		if errors.Is(storeErr, errAttachmentTooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "file is too large")
@@ -2019,7 +2025,45 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 	}, nil
 }
 
-var outboundFileReferencePattern = regexp.MustCompile(`(^|[[:space:]])@([^[:space:]]+)`)
+var (
+	outboundFileReferencePattern = regexp.MustCompile(`(^|[[:space:]])@([^[:space:]]+)`)
+	attachmentOpeningTagPattern  = regexp.MustCompile(`<file\s+name="[^"]*"([^>]*)>`)
+	attachmentTagIDPattern       = regexp.MustCompile(`\battachment-id="(att_[a-f0-9]{32})"`)
+	attachmentTagNamePattern     = regexp.MustCompile(`\battachment-name="([^"]+)"`)
+)
+
+func normalizeOpaqueAttachmentTags(text string) (string, bool) {
+	changed := false
+	replaced := attachmentOpeningTagPattern.ReplaceAllStringFunc(text, func(tag string) string {
+		idMatch := attachmentTagIDPattern.FindStringSubmatch(tag)
+		if len(idMatch) != 2 || !attachmentIDPattern.MatchString(idMatch[1]) {
+			return tag
+		}
+		name := "attachment"
+		if nameMatch := attachmentTagNamePattern.FindStringSubmatch(tag); len(nameMatch) == 2 && strings.TrimSpace(nameMatch[1]) != "" {
+			name = nameMatch[1]
+		}
+		opaquePrefix := `<file name="pi-attachment://` + idMatch[1] + `/` + name + `"`
+		if strings.HasPrefix(tag, opaquePrefix) {
+			return tag
+		}
+		// Find the closing quote of the name value and retain all remaining
+		// metadata attributes byte-for-byte.
+		namePrefix := strings.Index(tag, `name="`)
+		if namePrefix < 0 {
+			return tag
+		}
+		valueStart := namePrefix + len(`name="`)
+		relativeEnd := strings.Index(tag[valueStart:], `"`)
+		if relativeEnd < 0 {
+			return tag
+		}
+		valueEnd := valueStart + relativeEnd
+		changed = true
+		return `<file name="pi-attachment://` + idMatch[1] + `/` + name + tag[valueEnd:]
+	})
+	return replaced, changed
+}
 
 // decorateOutboundAttachmentRecords turns the documented @path marker in an
 // assistant response into the same opaque attachment markup used for inbound
@@ -2048,13 +2092,10 @@ func (s *server) decorateOutboundAttachmentRecord(ctx context.Context, session s
 		return raw
 	}
 	message, ok := event["message"].(map[string]any)
-	if !ok || stringValue(message, "role") != "assistant" {
+	if !ok {
 		return raw
 	}
 	messageID := stringValue(event, "id")
-	if messageID == "" {
-		return raw
-	}
 	content, ok := message["content"].([]any)
 	if !ok {
 		return raw
@@ -2069,9 +2110,19 @@ func (s *server) decorateOutboundAttachmentRecord(ctx context.Context, session s
 		if !ok || text == "" {
 			continue
 		}
-		if replacement, didReplace := s.replaceOutboundFileReferences(ctx, session, messageID, text); didReplace {
+		// Pi persists the internal materialized path because tools need it. The
+		// transport event must not expose that daemon path to Apple clients; an
+		// attachment-id makes the opaque URI authoritative on both devices.
+		if replacement, didReplace := normalizeOpaqueAttachmentTags(text); didReplace {
+			text = replacement
 			block["text"] = replacement
 			changed = true
+		}
+		if stringValue(message, "role") == "assistant" && messageID != "" {
+			if replacement, didReplace := s.replaceOutboundFileReferences(ctx, session, messageID, text); didReplace {
+				block["text"] = replacement
+				changed = true
+			}
 		}
 	}
 	if !changed {
@@ -4372,10 +4423,21 @@ func expandHome(path string) string {
 
 func sanitizeUploadName(name string) string {
 	base := filepath.Base(strings.TrimSpace(name))
-	if base == "." || base == string(filepath.Separator) || base == "" {
+	var safe strings.Builder
+	for _, r := range base {
+		if r == '/' || r == '\\' || r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			safe.WriteRune('-')
+			continue
+		}
+		safe.WriteRune(r)
+		if safe.Len() >= 240 {
+			break
+		}
+	}
+	base = strings.TrimSpace(safe.String())
+	if base == "." || base == ".." || base == "" {
 		base = "attachment"
 	}
-	base = strings.ReplaceAll(base, string(filepath.Separator), "-")
 	return base
 }
 

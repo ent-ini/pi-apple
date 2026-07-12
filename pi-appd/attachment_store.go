@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -63,6 +64,9 @@ func newAttachmentStore(agentDir string) (*attachmentStore, error) {
 	if err := os.MkdirAll(localRoot, 0o700); err != nil {
 		return nil, err
 	}
+	if err := os.Chmod(localRoot, 0o700); err != nil {
+		return nil, err
+	}
 	dbPath := expandHome(getenvDefault("PI_APPD_ATTACHMENTS_DB", filepath.Join(agentDir, "uploads.db")))
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, err
@@ -70,6 +74,18 @@ func newAttachmentStore(agentDir string) (*attachmentStore, error) {
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, err
+	}
+	// SQLite creates the DB lazily, so force the connection before tightening
+	// DB/WAL/SHM permissions below.
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			return nil, err
+		}
 	}
 	store := &attachmentStore{
 		db:        db,
@@ -204,6 +220,13 @@ func (s *attachmentStore) Upload(ctx context.Context, source io.Reader, original
 		return attachmentRecord{}, errAttachmentTooLarge
 	}
 	record.Size, record.SHA256 = n, hex.EncodeToString(hash.Sum(nil))
+	record.MimeType = normalizedUploadMIME(tempPath, safeName, record.MimeType)
+	// Reject an image at the upload stage, while both clients can still restore
+	// their draft/chips. Accepting it into MinIO only to reject /input later
+	// creates an orphan and an ambiguous submitted-send UX.
+	if strings.HasPrefix(strings.ToLower(record.MimeType), "image/") && record.Size > maxImageAttachmentBytes {
+		return attachmentRecord{}, errAttachmentTooLarge
+	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO attachments (id,bucket,object_key,original_file_name,safe_file_name,mime_type,size_bytes,sha256,local_path,state,remote_present,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, record.ID, s.bucket, record.ObjectKey, safeName, safeName, record.MimeType, record.Size, record.SHA256, record.LocalPath, "pending", 0, timestamp(record.CreatedAt), timestamp(record.ExpiresAt)); err != nil {
 		return attachmentRecord{}, err
 	}
@@ -213,17 +236,54 @@ func (s *attachmentStore) Upload(ctx context.Context, source io.Reader, original
 	}
 	if s.backend == "dual" {
 		if err := s.putRemote(ctx, record); err != nil {
-			// Keep the recoverable local cache and metadata for the next upload/reconcile,
-			// but do not report a success that cannot survive local cache eviction.
+			// There is no retry/reconciliation worker for pending rows. Roll the
+			// failed attempt back so a client retry cannot leave an inaccessible
+			// local file and immortal pending DB row behind.
+			s.rollbackUpload(context.Background(), record)
 			return attachmentRecord{}, fmt.Errorf("store attachment in MinIO: %w", err)
 		}
 		record.RemoteExists = true
 	}
 	record.State = "available"
 	if _, err := s.db.ExecContext(ctx, `UPDATE attachments SET state='available', remote_present=?, uploaded_at=?, last_accessed_at=? WHERE id=?`, boolInt(record.RemoteExists), timestamp(now), timestamp(now), record.ID); err != nil {
+		s.rollbackUpload(context.Background(), record)
 		return attachmentRecord{}, err
 	}
 	return record, nil
+}
+
+func normalizedUploadMIME(path, fileName, declared string) string {
+	declared = strings.TrimSpace(strings.Split(declared, ";")[0])
+	if strings.ContainsAny(declared, "\r\n") {
+		declared = ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return firstNonBlank(declared, contentTypeForPath(fileName), "application/octet-stream")
+	}
+	defer file.Close()
+	header := make([]byte, 512)
+	n, _ := io.ReadFull(file, header)
+	header = header[:n]
+	detected := http.DetectContentType(header)
+	brand := ""
+	if len(header) > 8 {
+		brand = string(header[8:min(32, len(header))])
+	}
+	isHEIC := len(header) >= 12 && string(header[4:8]) == "ftyp" && (strings.Contains(brand, "heic") || strings.Contains(brand, "heif") || strings.Contains(brand, "mif1"))
+	if isHEIC {
+		if strings.HasSuffix(strings.ToLower(fileName), ".heif") {
+			return "image/heif"
+		}
+		return "image/heic"
+	}
+	// Never let an untrusted declared image type route arbitrary bytes into a
+	// vision provider or ImageMagick. Other declarations remain useful for ZIP
+	// containers such as docx, where generic byte sniffing loses the real type.
+	if strings.HasPrefix(strings.ToLower(declared), "image/") && !strings.HasPrefix(detected, "image/") {
+		return detected
+	}
+	return firstNonBlank(declared, detected, contentTypeForPath(fileName), "application/octet-stream")
 }
 
 func (s *attachmentStore) putRemote(ctx context.Context, record attachmentRecord) error {
@@ -257,6 +317,11 @@ func (s *attachmentStore) Get(ctx context.Context, id string) (attachmentRecord,
 }
 
 func (s *attachmentStore) EnsureLocal(ctx context.Context, id string) (attachmentRecord, error) {
+	// Serialize with GC and materialisation. Without this lock GC could mark the
+	// row pending and unlink the cache between Get/touch/open in a download or
+	// active agent turn.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, err := s.Get(ctx, id)
 	if err != nil {
 		return attachmentRecord{}, err
@@ -267,12 +332,6 @@ func (s *attachmentStore) EnsureLocal(ctx context.Context, id string) (attachmen
 	}
 	if !record.RemoteExists || s.client == nil {
 		return attachmentRecord{}, errAttachmentNotFound
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.validLocal(record) {
-		s.touch(ctx, id)
-		return record, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(record.LocalPath), 0o700); err != nil {
 		return attachmentRecord{}, err
@@ -362,11 +421,27 @@ func (s *attachmentStore) ImportOutbound(ctx context.Context, sessionID, message
 
 func (s *attachmentStore) validLocal(record attachmentRecord) bool {
 	info, err := os.Lstat(record.LocalPath)
-	return err == nil && info.Mode().IsRegular() && info.Size() == record.Size && pathWithinRoot(record.LocalPath, s.localRoot)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != record.Size || !pathWithinRoot(record.LocalPath, s.localRoot) {
+		return false
+	}
+	file, err := os.Open(record.LocalPath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == record.SHA256
 }
 
 func (s *attachmentStore) touch(ctx context.Context, id string) {
-	_, _ = s.db.ExecContext(ctx, `UPDATE attachments SET last_accessed_at=? WHERE id=?`, timestamp(time.Now().UTC()), id)
+	now := time.Now().UTC()
+	until := now.Add(s.retention)
+	// Access renews availability. A file opened from old chat history should not
+	// be deleted minutes later merely because its original upload TTL elapsed.
+	_, _ = s.db.ExecContext(ctx, `UPDATE attachments SET last_accessed_at=?, expires_at=? WHERE id=? AND state='available'`, timestamp(now), timestamp(until), id)
 }
 
 func (s *attachmentStore) Bind(ctx context.Context, attachments []attachmentReference, sessionID string) {
@@ -391,6 +466,8 @@ func (s *attachmentStore) runGC() {
 }
 
 func (s *attachmentStore) collectExpired(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	rows, err := s.db.QueryContext(ctx, `SELECT id,object_key,local_path,remote_present FROM attachments WHERE state='available' AND expires_at <= ? LIMIT 100`, timestamp(time.Now().UTC()))
 	if err != nil {
 		return err
@@ -421,6 +498,17 @@ func (s *attachmentStore) collectExpired(ctx context.Context) error {
 		_, _ = s.db.ExecContext(ctx, `UPDATE attachments SET state='deleted', deleted_at=? WHERE id=?`, timestamp(time.Now().UTC()), id)
 	}
 	return rows.Err()
+}
+
+func (s *attachmentStore) rollbackUpload(ctx context.Context, record attachmentRecord) {
+	if s.client != nil {
+		// PutObject can finish server-side while its response is lost. Removing an
+		// opaque unique key is safe even when the object was never created.
+		_ = s.client.RemoveObject(ctx, s.bucket, record.ObjectKey, minio.RemoveObjectOptions{})
+	}
+	_ = os.Remove(record.LocalPath)
+	_ = os.Remove(filepath.Dir(record.LocalPath))
+	s.deleteRow(record.ID)
 }
 
 func (s *attachmentStore) deleteRow(id string) {

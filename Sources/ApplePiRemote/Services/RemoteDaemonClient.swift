@@ -2,7 +2,24 @@ import Foundation
 import ApplePiCore
 
 public struct RemoteDaemonClient: Sendable {
+    public static let maximumAttachmentCount = 16
+    public static let maximumUploadBytes: Int64 = 32 << 20
+    public static let maximumImageUploadBytes: Int64 = 10 << 20
+
     public init() {}
+
+    public static func validateUploadBatch(_ attachments: [ChatAttachment]) throws {
+        guard attachments.count <= maximumAttachmentCount else {
+            throw RemoteDaemonError.requestFailed(status: 413, body: "You can attach up to \(maximumAttachmentCount) files at once.")
+        }
+        for attachment in attachments {
+            guard let knownSize = attachment.size else { continue }
+            let limit = attachment.isImage ? maximumImageUploadBytes : maximumUploadBytes
+            if knownSize > limit {
+                throw RemoteDaemonError.requestFailed(status: 413, body: "\(attachment.displayName) is too large (limit \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))).")
+            }
+        }
+    }
 
     public func testConnection(host: PiHostConfiguration, tokenOverride: String? = nil) async throws -> String {
         let _: HealthResponse = try await send(
@@ -704,18 +721,25 @@ public struct RemoteDaemonClient: Sendable {
         )
     }
 
-    public func uploadAttachment(host: PiHostConfiguration, attachment: ChatAttachment) async throws -> UploadedAttachmentReference {
+    public func uploadAttachment(host: PiHostConfiguration, attachment: ChatAttachment, tokenOverride: String? = nil) async throws -> UploadedAttachmentReference {
         let boundary = "ApplePiBoundary-\(UUID().uuidString)"
         var request = try makeRequest(
             host: host,
             path: "/uploads",
             method: "POST",
+            tokenOverride: tokenOverride,
             accept: "application/json"
         )
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         // V2 clients exchange opaque attachment IDs only. Older builds omit
         // this header and still receive the legacy daemon cache path.
         request.setValue("2", forHTTPHeaderField: "X-Pi-Attachment-Protocol")
+        // Keep the multipart header ASCII-safe, but preserve the user-visible
+        // Unicode filename in a bounded base64 header understood by pi-appd.
+        request.setValue(
+            Data(attachment.displayName.utf8).base64EncodedString(),
+            forHTTPHeaderField: "X-Pi-Attachment-Name-B64"
+        )
 
         // The filename is embedded directly in a
         // `Content-Disposition: form-data; name="file"; filename="…"`

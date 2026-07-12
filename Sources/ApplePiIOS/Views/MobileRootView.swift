@@ -1252,10 +1252,17 @@ private struct MobileSessionDetailView: View {
 
     private func addAttachments(from urls: [URL]) {
         guard !urls.isEmpty else { return }
+        var staged: [ChatAttachment] = []
         do {
-            let staged = try urls.map { try MobileAttachmentStagingService.stageFile(at: $0) }
+            for url in urls {
+                staged.append(try MobileAttachmentStagingService.stageFile(at: url))
+            }
             appendAttachments(staged)
         } catch {
+            // The picker can return several security-scoped URLs. If one copy
+            // fails, remove every earlier staging copy instead of leaking it in
+            // Application Support with no composer chip referencing it.
+            cleanupAttachments(staged)
             appState.showStatus(error.localizedDescription)
         }
     }
@@ -1887,6 +1894,7 @@ private struct MobileAttachmentCard: View {
     @State private var localURL: URL?
     @State private var previewURL: URL?
     @State private var isLoading = false
+    @State private var errorText: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1917,6 +1925,12 @@ private struct MobileAttachmentCard: View {
                     }
                 }
             }
+            if let errorText {
+                Text(errorText)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
         }
         .padding(10)
         .background(Color.black.opacity(0.10))
@@ -1927,16 +1941,26 @@ private struct MobileAttachmentCard: View {
     private func preview() {
         Task {
             isLoading = true
+            errorText = nil
             defer { isLoading = false }
-            previewURL = try? await materialize()
+            do {
+                previewURL = try await materialize()
+            } catch {
+                errorText = error.localizedDescription
+            }
         }
     }
 
     private func download() {
         Task {
             isLoading = true
+            errorText = nil
             defer { isLoading = false }
-            _ = try? await materialize()
+            do {
+                _ = try await materialize()
+            } catch {
+                errorText = error.localizedDescription
+            }
         }
     }
 

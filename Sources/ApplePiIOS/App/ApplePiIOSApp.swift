@@ -1359,11 +1359,12 @@ final class MobilePiAppState: ObservableObject {
 
     private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment], host: PiHostConfiguration) async throws -> [UploadedAttachmentReference] {
         guard !attachments.isEmpty else { return [] }
+        try RemoteDaemonClient.validateUploadBatch(attachments)
         let client = RemoteDaemonClient()
         var uploaded: [UploadedAttachmentReference] = []
         uploaded.reserveCapacity(attachments.count)
         for attachment in attachments {
-            uploaded.append(try await client.uploadAttachment(host: host, attachment: attachment))
+            uploaded.append(try await client.uploadAttachment(host: host, attachment: attachment, tokenOverride: daemonToken.nilIfBlank))
         }
         return uploaded
     }

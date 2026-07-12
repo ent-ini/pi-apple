@@ -3301,6 +3301,7 @@ final class PiAppState: ObservableObject {
 
     private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment], host: PiHostConfiguration) async throws -> [UploadedAttachmentReference] {
         guard !attachments.isEmpty else { return [] }
+        try RemoteDaemonClient.validateUploadBatch(attachments)
         var uploaded: [UploadedAttachmentReference] = []
         let client = RemoteDaemonClient()
         for attachment in attachments {
