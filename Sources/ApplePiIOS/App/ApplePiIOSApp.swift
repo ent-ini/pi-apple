@@ -384,6 +384,7 @@ final class MobilePiAppState: ObservableObject {
 
     func selectSession(_ session: PiSessionSummary) {
         selectedPendingNewSessionSendID = nil
+        pendingNewSessionModelPreference = nil
         stopSelectedSessionStream()
         selectedSession = session
         selectedRuntime = nil
@@ -751,7 +752,14 @@ final class MobilePiAppState: ObservableObject {
         let initialSessionID = initialSession?.id.nilIfBlank
         let startsNewSession = initialSessionID == nil
         let sessionTitleForSource = initialSession?.title ?? "New Session"
-        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, sessionTitle: sessionTitleForSource)
+        let launchPreference = startsNewSession
+            ? (pendingNewSessionModelPreference ?? defaultModelPreference)
+            : nil
+        let taggedPrompt = sourceTaggedAppPrompt(
+            effectivePrompt,
+            sessionTitle: sessionTitleForSource,
+            modelPreference: launchPreference
+        )
         let operationID = beginSendOperation(sessionID: initialSessionID)
         let context = TurnStreamContext(
             operationID: operationID,
@@ -760,12 +768,11 @@ final class MobilePiAppState: ObservableObject {
         )
         // Capture the preference for this turn. Attachment uploads suspend the
         // task and the user can change Settings while they are in flight.
-        let launchPreference = defaultModelPreference
         var operationFinished = false
         draft = ""
         if startsNewSession {
             selectedPendingNewSessionSendID = operationID
-            selectedRuntime = defaultRuntimeForDisplay
+            selectedRuntime = newSessionRuntimeForDisplay
             resetSelectedTranscript()
         }
         defer {
@@ -803,6 +810,7 @@ final class MobilePiAppState: ObservableObject {
                 // now replace the optimistic default runtime with the server's
                 // authoritative state.
                 await refreshSelectedRuntimeAndModels()
+                pendingNewSessionModelPreference = nil
             }
             await reloadCatalog(quietly: true)
             startSelectedSessionStreamIfPossible()
@@ -1550,14 +1558,20 @@ final class MobilePiAppState: ObservableObject {
         return String(format: "%.1fM", Double(value) / 1_000_000)
     }
 
-    private func sourceTaggedAppPrompt(_ text: String, sessionTitle: String) -> String {
+    private func sourceTaggedAppPrompt(
+        _ text: String,
+        sessionTitle: String,
+        modelPreference: DefaultModelPreference? = nil
+    ) -> String {
         if text.range(of: #"^\[source:[^\]]+\]"#, options: .regularExpression) != nil {
             return text
         }
         let model = selectedSession == nil
-            ? defaultModelDisplayName
+            ? (modelPreference?.id ?? defaultModelDisplayName)
             : (selectedModelDisplayName.nilIfBlank ?? selectedSession?.latestModel ?? defaultModelPreference?.id ?? "unknown")
-        let thinking = selectedSession == nil ? defaultThinkingDisplayName : selectedThinkingLevel
+        let thinking = selectedSession == nil
+            ? (modelPreference?.thinkingLevel?.nilIfBlank ?? defaultThinkingDisplayName)
+            : selectedThinkingLevel
         let fields = [
             "source:pi-ios-app",
             "type=text",
@@ -1635,7 +1649,7 @@ final class MobilePiAppState: ObservableObject {
         if defaultRuntime != nil {
             saveSessionDefaultsCache()
             if selectedSession == nil {
-                selectedRuntime = defaultRuntimeForDisplay
+                selectedRuntime = newSessionRuntimeForDisplay
                 availableModels = cachedSelectableAvailableModels
             }
         }
@@ -1667,7 +1681,7 @@ final class MobilePiAppState: ObservableObject {
             cachedAvailableModels = Self.selectableModels(from: decoded.snapshot.availableModels)
             availableModelsCacheLoadedAt = decoded.loadedAt
         }
-        selectedRuntime = defaultRuntimeForDisplay
+        selectedRuntime = newSessionRuntimeForDisplay
         availableModels = cachedSelectableAvailableModels
     }
 
@@ -1678,7 +1692,7 @@ final class MobilePiAppState: ObservableObject {
             cacheAvailableModels(snapshot.availableModels, loadedAt: loadedAt)
         }
         saveSessionDefaultsCache()
-        selectedRuntime = selectedSession == nil ? defaultRuntimeForDisplay : selectedRuntime
+        selectedRuntime = selectedSession == nil ? newSessionRuntimeForDisplay : selectedRuntime
     }
 
     private func saveSessionDefaultsCache() {
