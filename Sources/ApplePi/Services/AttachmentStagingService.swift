@@ -6,8 +6,11 @@ import ApplePiRemote
 
 struct AttachmentStagingService {
     func stageFile(at sourceURL: URL) throws -> ChatAttachment {
+        let scoped = sourceURL.startAccessingSecurityScopedResource()
+        defer { if scoped { sourceURL.stopAccessingSecurityScopedResource() } }
+        let displayName = sourceURL.lastPathComponent.nilIfBlank ?? "attachment"
         let destinationURL = try makeDestinationURL(
-            suggestedName: sourceURL.lastPathComponent,
+            suggestedName: displayName,
             preferredExtension: sourceURL.pathExtension.nilIfBlank
         )
 
@@ -21,7 +24,7 @@ struct AttachmentStagingService {
         return ChatAttachment(
             kind: chatAttachmentKind(for: type),
             fileURL: destinationURL,
-            displayName: destinationURL.lastPathComponent,
+            displayName: displayName,
             mimeType: type?.preferredMIMEType,
             size: values.fileSize.map(Int64.init)
         )
@@ -51,7 +54,7 @@ struct AttachmentStagingService {
         return ChatAttachment(
             kind: .image,
             fileURL: destinationURL,
-            displayName: destinationURL.lastPathComponent,
+            displayName: suggestedName,
             mimeType: UTType.png.preferredMIMEType,
             size: Int64(data.count)
         )

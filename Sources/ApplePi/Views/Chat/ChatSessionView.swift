@@ -478,7 +478,8 @@ struct ChatSessionView: View {
                 dynamicHeight: draftHeightBinding,
                 textColor: appState.appearance.textColor(for: appState.appearance.resolvedColorScheme(current: colorScheme)),
                 onSubmit: handleComposerSubmit,
-                onPasteAttachments: handlePasteAttachments
+                onPasteAttachments: handlePasteAttachments,
+                onDropFiles: addAttachments
             )
             .frame(maxWidth: .infinity, minHeight: controlHeight, maxHeight: controlHeight)
         }
@@ -1095,13 +1096,15 @@ private struct ComposerTextView: NSViewRepresentable {
     let textColor: Color
     let onSubmit: () -> Void
     let onPasteAttachments: (NSPasteboard) -> Void
+    let onDropFiles: ([URL]) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             text: $text,
             dynamicHeight: $dynamicHeight,
             onSubmit: onSubmit,
-            onPasteAttachments: onPasteAttachments
+            onPasteAttachments: onPasteAttachments,
+            onDropFiles: onDropFiles
         )
     }
 
@@ -1121,6 +1124,8 @@ private struct ComposerTextView: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.onSubmit = onSubmit
         textView.onPasteAttachments = onPasteAttachments
+        textView.onDropFiles = onDropFiles
+        textView.registerForDraggedTypes([.fileURL])
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
@@ -1164,6 +1169,7 @@ private struct ComposerTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
         textView.onPasteAttachments = onPasteAttachments
+        textView.onDropFiles = onDropFiles
         if textView.string != text {
             textView.string = text
         }
@@ -1185,18 +1191,21 @@ private struct ComposerTextView: NSViewRepresentable {
         @Binding var dynamicHeight: CGFloat
         let onSubmit: () -> Void
         let onPasteAttachments: (NSPasteboard) -> Void
+        let onDropFiles: ([URL]) -> Void
         weak var textView: ComposerNSTextView?
 
         init(
             text: Binding<String>,
             dynamicHeight: Binding<CGFloat>,
             onSubmit: @escaping () -> Void,
-            onPasteAttachments: @escaping (NSPasteboard) -> Void
+            onPasteAttachments: @escaping (NSPasteboard) -> Void,
+            onDropFiles: @escaping ([URL]) -> Void
         ) {
             self._text = text
             self._dynamicHeight = dynamicHeight
             self.onSubmit = onSubmit
             self.onPasteAttachments = onPasteAttachments
+            self.onDropFiles = onDropFiles
         }
 
         func textDidChange(_ notification: Notification) {
@@ -1248,6 +1257,22 @@ private final class ComposerScrollView: NSScrollView {
 private final class ComposerNSTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onPasteAttachments: ((NSPasteboard) -> Void)?
+    var onDropFiles: (([URL]) -> Void)?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.fileURLs(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.fileURLs(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = Self.fileURLs(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return false }
+        onDropFiles?(urls)
+        return true
+    }
 
     override func keyDown(with event: NSEvent) {
         if Self.isPasteShortcut(event) {
@@ -1287,6 +1312,15 @@ private final class ComposerNSTextView: NSTextView {
         guard flags.contains(.command) || flags.contains(.control) else { return false }
         if event.keyCode == 9 { return true }
         return event.charactersIgnoringModifiers?.lowercased() == "v"
+    }
+
+    private static func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        (pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] ?? [])
+            .filter { $0.isFileURL }
+            .filter { url in
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+            }
     }
 
     private static func hasAttachmentPayload(in pasteboard: NSPasteboard) -> Bool {

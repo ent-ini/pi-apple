@@ -50,6 +50,7 @@ type server struct {
 	agentDir     string
 	token        string
 	piExecutable string
+	attachments  *attachmentStore
 
 	activeRunsMu sync.Mutex
 	activeRuns   map[string]*activeRun
@@ -255,10 +256,14 @@ type fileItemRecord struct {
 }
 
 type attachmentReference struct {
-	Path     string `json:"path"`
+	// ID is the opaque public reference. Path remains only for old Apple clients
+	// and legacy JSONL turns; new clients must send ID.
+	ID       string `json:"id,omitempty"`
+	Path     string `json:"path,omitempty"`
 	FileName string `json:"fileName,omitempty"`
 	MimeType string `json:"mimeType,omitempty"`
 	Size     int64  `json:"size,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
 }
 
 type createSessionRequest struct {
@@ -302,10 +307,22 @@ type sessionBoundRecord struct {
 }
 
 type uploadResponse struct {
-	Path     string `json:"path"`
-	FileName string `json:"fileName"`
-	MimeType string `json:"mimeType,omitempty"`
-	Size     int64  `json:"size,omitempty"`
+	ID        string `json:"id"`
+	Path      string `json:"path,omitempty"` // legacy compatibility; do not use in new clients.
+	FileName  string `json:"fileName"`
+	MimeType  string `json:"mimeType,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+}
+
+type attachmentMetadataResponse struct {
+	ID        string `json:"id"`
+	FileName  string `json:"fileName"`
+	MimeType  string `json:"mimeType,omitempty"`
+	Size      int64  `json:"size"`
+	SHA256    string `json:"sha256"`
+	ExpiresAt string `json:"expiresAt"`
 }
 
 type transcriptionResponse struct {
@@ -513,8 +530,15 @@ func main() {
 	token := strings.TrimSpace(os.Getenv("PI_APPD_TOKEN"))
 	piExecutable := getenvDefault("PI_APPD_PI_EXECUTABLE", "pi")
 
+	attachmentStore, err := newAttachmentStore(expandHome(agentDir))
+	if err != nil {
+		log.Fatalf("initialize attachment storage: %v", err)
+	}
+	defer attachmentStore.Close()
+
 	srv := &server{
 		agentDir:         expandHome(agentDir),
+		attachments:      attachmentStore,
 		token:            token,
 		piExecutable:     piExecutable,
 		sessionsByID:     map[string]sessionRecord{},
@@ -535,12 +559,14 @@ func main() {
 	mux.HandleFunc("/files", srv.handleFiles)
 	mux.HandleFunc("/file", srv.handleFile)
 	mux.HandleFunc("/uploads", srv.handleUploads)
+	mux.HandleFunc("/uploads/", srv.handleUploadSubroutes)
 	mux.HandleFunc("/transcribe", srv.handleTranscribe)
 	mux.HandleFunc("/devices", srv.handleDevices)
 	mux.HandleFunc("/devices/", srv.handleDeviceSubroutes)
 	mux.HandleFunc("/device-jobs/", srv.handleDeviceJobSubroutes)
 
 	go srv.watchCatalog()
+	go attachmentStore.runGC()
 
 	log.Printf("pi-appd listening on %s (agentDir=%s)", addr, srv.agentDir)
 	httpServer := &http.Server{
@@ -1696,40 +1722,76 @@ func (s *server) handleUploads(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	uploadDir := filepath.Join(s.agentDir, "uploads")
-	if err := os.MkdirAll(uploadDir, 0o700); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if s.attachments == nil {
+		store, storeErr := newAttachmentStore(s.agentDir)
+		if storeErr != nil {
+			writeError(w, http.StatusInternalServerError, storeErr.Error())
+			return
+		}
+		s.attachments = store
+	}
+	record, storeErr := s.attachments.Upload(r.Context(), file, header.Filename, header.Header.Get("Content-Type"))
+	if storeErr != nil {
+		if errors.Is(storeErr, errAttachmentTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "file is too large")
+			return
+		}
+		writeError(w, http.StatusBadGateway, storeErr.Error())
 		return
 	}
-
-	fileName := sanitizeUploadName(header.Filename)
-	targetPath := filepath.Join(uploadDir, uniqueUploadName(fileName))
-	targetFile, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	defer targetFile.Close()
-
-	limitedFile := &io.LimitedReader{R: file, N: maxUploadFileBytes + 1}
-	size, err := io.Copy(targetFile, limitedFile)
-	if err != nil {
-		_ = os.Remove(targetPath)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if size > maxUploadFileBytes {
-		_ = os.Remove(targetPath)
-		writeError(w, http.StatusRequestEntityTooLarge, "file is too large")
-		return
-	}
-
 	writeJSON(w, http.StatusOK, uploadResponse{
-		Path:     targetPath,
-		FileName: filepath.Base(targetPath),
-		MimeType: header.Header.Get("Content-Type"),
-		Size:     size,
+		ID:        record.ID,
+		Path:      record.LocalPath,
+		FileName:  record.FileName,
+		MimeType:  record.MimeType,
+		Size:      record.Size,
+		SHA256:    record.SHA256,
+		ExpiresAt: timestamp(record.ExpiresAt),
 	})
+}
+
+func (s *server) handleUploadSubroutes(w http.ResponseWriter, r *http.Request) {
+	if s.attachments == nil {
+		writeError(w, http.StatusServiceUnavailable, "attachment storage is unavailable")
+		return
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/uploads/"), "/"), "/")
+	if len(parts) == 0 || parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "content") {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	record, err := s.attachments.Get(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if len(parts) == 1 {
+		writeJSON(w, http.StatusOK, attachmentMetadataResponse{ID: record.ID, FileName: record.FileName, MimeType: record.MimeType, Size: record.Size, SHA256: record.SHA256, ExpiresAt: timestamp(record.ExpiresAt)})
+		return
+	}
+	record, err = s.attachments.EnsureLocal(r.Context(), record.ID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "attachment content is unavailable")
+		return
+	}
+	file, err := os.Open(record.LocalPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "attachment content is unavailable")
+		return
+	}
+	defer file.Close()
+	contentType := strings.TrimSpace(record.MimeType)
+	if contentType == "" {
+		contentType = contentTypeForPath(record.FileName)
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": sanitizeDownloadFilename(record.FileName)}))
+	http.ServeContent(w, r, record.FileName, record.CreatedAt, file)
 }
 
 func (s *server) handleTranscribe(w http.ResponseWriter, r *http.Request) {
@@ -1949,11 +2011,32 @@ func (s *server) resolveAttachmentPaths(attachments []attachmentReference) ([]at
 		return nil, nil
 	}
 	allowedRoot := filepath.Clean(filepath.Join(s.agentDir, "uploads"))
+	if s.attachments != nil {
+		allowedRoot = s.attachments.localRoot
+	}
 	if realRoot, err := filepath.EvalSymlinks(allowedRoot); err == nil {
 		allowedRoot = filepath.Clean(realRoot)
 	}
 	resolved := make([]attachmentReference, 0, len(attachments))
 	for _, attachment := range attachments {
+		if strings.TrimSpace(attachment.ID) != "" {
+			if s.attachments == nil {
+				return nil, errors.New("attachment store is unavailable")
+			}
+			record, err := s.attachments.EnsureLocal(context.Background(), attachment.ID)
+			if err != nil {
+				return nil, errors.New("attachment does not exist")
+			}
+			attachment.Path = record.LocalPath
+			attachment.FileName = firstNonBlank(attachment.FileName, record.FileName)
+			attachment.MimeType = firstNonBlank(attachment.MimeType, record.MimeType)
+			attachment.Size = record.Size
+			attachment.SHA256 = record.SHA256
+			resolved = append(resolved, attachment)
+			continue
+		}
+		// Compatibility for turns sent by older applications. This path is still
+		// confined to the private cache and is never accepted outside it.
 		pathValue, err := filepath.Abs(expandHome(strings.TrimSpace(attachment.Path)))
 		if err != nil {
 			return nil, errors.New("invalid attachment path")

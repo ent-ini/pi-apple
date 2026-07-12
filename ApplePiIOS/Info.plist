@@ -51,6 +51,8 @@
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    <key>NSCameraUsageDescription</key>
+    <string>pi-app uses the camera to attach a photo to a remote chat.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>pi-app uses the microphone to record voice prompts and transcribe them through the configured remote daemon.</string>
     <key>UILaunchScreen</key>

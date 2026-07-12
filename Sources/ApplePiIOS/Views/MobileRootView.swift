@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import UniformTypeIdentifiers
 import ApplePiCore
 import ApplePiRemote
@@ -313,6 +314,9 @@ private struct MobileSessionDetailView: View {
     @State private var showsSubagents = false
     @State private var showsRenameAlert = false
     @State private var showsFileImporter = false
+    @State private var showsPhotoPicker = false
+    @State private var showsCamera = false
+    @State private var selectedPhoto: PhotosPickerItem?
     @State private var draftAttachments: [ChatAttachment] = []
     @StateObject private var audioRecorder = MobileAudioRecordingController()
     @State private var isTranscribingAudio = false
@@ -426,6 +430,17 @@ private struct MobileSessionDetailView: View {
             allowsMultipleSelection: true,
             onCompletion: handleFileImporterResult
         )
+        .photosPicker(isPresented: $showsPhotoPicker, selection: $selectedPhoto, matching: .images)
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            Task { await importPhoto(item) }
+        }
+        .sheet(isPresented: $showsCamera) {
+            MobileCameraPicker { image in
+                importCameraImage(image)
+            }
+            .ignoresSafeArea()
+        }
         .mobileBackSwipe { dismiss() }
         .onAppear {
             appState.setChatVisible(true)
@@ -886,9 +901,32 @@ private struct MobileSessionDetailView: View {
             }
 
             HStack(alignment: .bottom, spacing: 10) {
-                MobileComposerIconButton(systemName: "plus") {
-                    showsFileImporter = true
+                Menu {
+                    Button {
+                        showsCamera = true
+                    } label: {
+                        Label("Take Photo", systemImage: "camera")
+                    }
+                    .disabled(!MobileCameraPicker.isAvailable)
+
+                    Button {
+                        showsPhotoPicker = true
+                    } label: {
+                        Label("Photo Library", systemImage: "photo.on.rectangle")
+                    }
+
+                    Button {
+                        showsFileImporter = true
+                    } label: {
+                        Label("Choose File", systemImage: "folder")
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 28, height: 28)
                 }
+                .accessibilityLabel("Add attachment")
+                .tint(appState.appearance.accentColor)
 
                 TextField("", text: $appState.draft, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -1149,15 +1187,57 @@ private struct MobileSessionDetailView: View {
         }
     }
 
+    private func importPhoto(_ item: PhotosPickerItem) async {
+        defer { selectedPhoto = nil }
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                appState.showStatus("Could not load the selected photo.")
+                return
+            }
+            let contentType = item.supportedContentTypes.first(where: { $0.conforms(to: .image) }) ?? .jpeg
+            let extensionName = contentType.preferredFilenameExtension ?? "jpg"
+            let attachment = try MobileAttachmentStagingService.stageImageData(
+                data,
+                suggestedName: "photo-\(UUID().uuidString).\(extensionName)",
+                contentType: contentType
+            )
+            appendAttachments([attachment])
+        } catch {
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+
+    private func importCameraImage(_ image: UIImage?) {
+        guard let image else { return }
+        do {
+            guard let data = image.jpegData(compressionQuality: 0.92) else {
+                appState.showStatus("Could not prepare the photo.")
+                return
+            }
+            let attachment = try MobileAttachmentStagingService.stageImageData(
+                data,
+                suggestedName: "camera-\(UUID().uuidString).jpg",
+                contentType: .jpeg
+            )
+            appendAttachments([attachment])
+        } catch {
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+
     private func addAttachments(from urls: [URL]) {
         guard !urls.isEmpty else { return }
         do {
             let staged = try urls.map { try MobileAttachmentStagingService.stageFile(at: $0) }
-            for attachment in staged where !draftAttachments.contains(where: { $0.fileURL == attachment.fileURL }) {
-                draftAttachments.append(attachment)
-            }
+            appendAttachments(staged)
         } catch {
             appState.showStatus(error.localizedDescription)
+        }
+    }
+
+    private func appendAttachments(_ attachments: [ChatAttachment]) {
+        for attachment in attachments where !draftAttachments.contains(where: { $0.fileURL == attachment.fileURL }) {
+            draftAttachments.append(attachment)
         }
     }
 
@@ -1200,6 +1280,21 @@ private enum MobileAttachmentStagingService {
         )
     }
 
+    static func stageImageData(_ data: Data, suggestedName: String, contentType: UTType) throws -> ChatAttachment {
+        let destinationURL = try makeDestinationURL(
+            suggestedName: suggestedName,
+            preferredExtension: contentType.preferredFilenameExtension ?? URL(fileURLWithPath: suggestedName).pathExtension.nilIfBlank
+        )
+        try data.write(to: destinationURL, options: .atomic)
+        return ChatAttachment(
+            kind: .image,
+            fileURL: destinationURL,
+            displayName: suggestedName,
+            mimeType: contentType.preferredMIMEType,
+            size: Int64(data.count)
+        )
+    }
+
     private static func makeDestinationURL(suggestedName: String, preferredExtension: String?) throws -> URL {
         let support = try FileManager.default.url(
             for: .applicationSupportDirectory,
@@ -1226,6 +1321,39 @@ private enum MobileAttachmentStagingService {
         if type.conforms(to: .image) { return .image }
         if type.conforms(to: .audio) { return .audio }
         return .file
+    }
+}
+
+private struct MobileCameraPicker: UIViewControllerRepresentable {
+    static var isAvailable: Bool { UIImagePickerController.isSourceTypeAvailable(.camera) }
+
+    let onComplete: (UIImage?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator { Coordinator(onComplete: onComplete, dismiss: dismiss) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onComplete: (UIImage?) -> Void
+        let dismiss: DismissAction
+        init(onComplete: @escaping (UIImage?) -> Void, dismiss: DismissAction) {
+            self.onComplete = onComplete
+            self.dismiss = dismiss
+        }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { dismiss() }
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            onComplete(info[.originalImage] as? UIImage)
+            dismiss()
+        }
     }
 }
 

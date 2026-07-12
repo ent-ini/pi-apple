@@ -1,0 +1,15 @@
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: pi-appd-minio
+    restart: unless-stopped
+    env_file:
+      - /home/agent/ai-agent/workspace/.secrets/pi-appd-minio.env
+    command: server /data --address :9000 --console-address :9001
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - /home/agent/.local/share/pi-appd-minio:/data
+    security_opt:
+      - no-new-privileges:true

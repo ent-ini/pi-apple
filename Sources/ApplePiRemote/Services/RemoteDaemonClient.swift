@@ -682,6 +682,28 @@ public struct RemoteDaemonClient: Sendable {
         )
     }
 
+    public func downloadAttachment(host: PiHostConfiguration, id: String, tokenOverride: String? = nil) async throws -> RemoteFileDownload {
+        let request = try makeRequest(
+            host: host,
+            path: "/uploads/\(id)/content",
+            tokenOverride: tokenOverride,
+            accept: "*/*"
+        )
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw RemoteDaemonError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RemoteDaemonError.requestFailed(status: httpResponse.statusCode, body: message)
+        }
+        return RemoteFileDownload(
+            data: data,
+            fileName: Self.fileNameFromContentDisposition(httpResponse.value(forHTTPHeaderField: "Content-Disposition")) ?? "attachment",
+            mimeType: httpResponse.value(forHTTPHeaderField: "Content-Type")
+        )
+    }
+
     public func uploadAttachment(host: PiHostConfiguration, attachment: ChatAttachment) async throws -> UploadedAttachmentReference {
         let boundary = "ApplePiBoundary-\(UUID().uuidString)"
         var request = try makeRequest(
@@ -1629,16 +1651,47 @@ public struct RemoteFileDownload: Sendable {
 }
 
 public struct UploadedAttachmentReference: Codable, Hashable, Sendable {
+    /// Opaque daemon attachment ID. New requests encode this instead of a path.
+    public let id: String?
+    /// Kept for decoding responses from older daemons only.
     public let path: String
     public let fileName: String
     public let mimeType: String?
     public let size: Int64?
+    public let sha256: String?
+    public let expiresAt: String?
 
-    public init(path: String, fileName: String, mimeType: String?, size: Int64?) {
+    public init(
+        id: String? = nil,
+        path: String = "",
+        fileName: String,
+        mimeType: String?,
+        size: Int64?,
+        sha256: String? = nil,
+        expiresAt: String? = nil
+    ) {
+        self.id = id
         self.path = path
         self.fileName = fileName
         self.mimeType = mimeType
         self.size = size
+        self.sha256 = sha256
+        self.expiresAt = expiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, path, fileName, mimeType, size, sha256, expiresAt }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let id, !id.isEmpty {
+            try container.encode(id, forKey: .id)
+        } else {
+            try container.encode(path, forKey: .path)
+        }
+        try container.encode(fileName, forKey: .fileName)
+        try container.encodeIfPresent(mimeType, forKey: .mimeType)
+        try container.encodeIfPresent(size, forKey: .size)
+        try container.encodeIfPresent(sha256, forKey: .sha256)
     }
 }
 
