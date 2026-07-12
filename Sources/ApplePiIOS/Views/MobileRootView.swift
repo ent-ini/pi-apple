@@ -950,11 +950,6 @@ private struct MobileSessionDetailView: View {
                     .focused($isComposerFocused)
                     .padding(.vertical, 8)
                     .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
-                    #if canImport(UIKit)
-                    .onPasteCommand(of: [.image, .fileURL]) { providers in
-                        importPastedItemProviders(providers)
-                    }
-                    #endif
 
                 MobileComposerIconButton(systemName: audioRecorder.isRecording ? "stop.fill" : "mic.fill", isDisabled: isTranscribingAudio) {
                     handleMicrophoneTapped()
@@ -1296,7 +1291,7 @@ private struct MobileSessionDetailView: View {
     }
 
     private func importPastedItemProvider(_ provider: NSItemProvider) {
-        let types = provider.registeredTypeIdentifiers.compactMap(UTType.init(identifier:))
+        let types = provider.registeredTypeIdentifiers.compactMap { UTType($0) }
         if let imageType = types.first(where: { $0.conforms(to: .image) }) {
             provider.loadDataRepresentation(forTypeIdentifier: imageType.identifier) { data, error in
                 guard let data, error == nil else { return }
