@@ -21,6 +21,11 @@ struct ApplePiIOSApp: App {
     }
 }
 
+enum MobileDraftSendOutcome {
+    case submitted
+    case uploadFailed
+}
+
 @MainActor
 final class MobilePiAppState: ObservableObject {
     @Published var daemonURL: String {
@@ -744,9 +749,9 @@ final class MobilePiAppState: ObservableObject {
     }
 
     @discardableResult
-    func sendDraft(attachments: [ChatAttachment] = []) async -> Bool {
+    func sendDraft(attachments: [ChatAttachment] = []) async -> MobileDraftSendOutcome {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty || !attachments.isEmpty else { return false }
+        guard !prompt.isEmpty || !attachments.isEmpty else { return .uploadFailed }
         let effectivePrompt = prompt.isEmpty ? "Please inspect the attached item(s)." : prompt
         let initialSession = selectedSession
         let initialSessionID = initialSession?.id.nilIfBlank
@@ -755,19 +760,18 @@ final class MobilePiAppState: ObservableObject {
         let launchPreference = startsNewSession
             ? (pendingNewSessionModelPreference ?? defaultModelPreference)
             : nil
+        let operationID = beginSendOperation(sessionID: initialSessionID)
         let taggedPrompt = sourceTaggedAppPrompt(
             effectivePrompt,
             sessionTitle: sessionTitleForSource,
-            modelPreference: launchPreference
+            modelPreference: launchPreference,
+            clientSendID: operationID
         )
-        let operationID = beginSendOperation(sessionID: initialSessionID)
         let context = TurnStreamContext(
             operationID: operationID,
             initialSessionID: initialSessionID,
             startedNewSession: startsNewSession
         )
-        // Capture the preference for this turn. Attachment uploads suspend the
-        // task and the user can change Settings while they are in flight.
         var operationFinished = false
         draft = ""
         if startsNewSession {
@@ -775,6 +779,9 @@ final class MobilePiAppState: ObservableObject {
             selectedRuntime = newSessionRuntimeForDisplay
             resetSelectedTranscript()
         }
+        // Render immediately from operation-owned staging files. Uploading to
+        // MinIO must never blank the transcript or leave the composer occupied.
+        appendOptimisticUserMessage(taggedPrompt, attachments: attachments, operationID: operationID)
         defer {
             if !operationFinished {
                 finishSendOperation(operationID)
@@ -782,9 +789,25 @@ final class MobilePiAppState: ObservableObject {
         }
 
         let host = host
+        let uploadedAttachments: [UploadedAttachmentReference]
         do {
-            let uploadedAttachments = try await uploadAttachmentsIfNeeded(attachments)
-            appendOptimisticUserMessage(taggedPrompt, attachments: uploadedAttachments)
+            uploadedAttachments = try await uploadAttachmentsIfNeeded(attachments, host: host)
+            replaceOptimisticAttachments(operationID: operationID, prompt: taggedPrompt, attachments: uploadedAttachments)
+            for attachment in attachments {
+                try? FileManager.default.removeItem(at: attachment.fileURL)
+            }
+        } catch {
+            statusMessage = error.localizedDescription
+            removeOptimisticUserMessage(operationID: operationID)
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                draft = prompt
+            }
+            finishSendOperation(operationID)
+            operationFinished = true
+            return .uploadFailed
+        }
+
+        do {
             if let sessionID = initialSessionID {
                 try await RemoteDaemonClient().streamSend(host: host, sessionID: sessionID, prompt: taggedPrompt, attachments: uploadedAttachments, keepRunningOnDisconnect: true) { event in
                     await self.handleTurnStreamEvent(event, context: context)
@@ -803,26 +826,21 @@ final class MobilePiAppState: ObservableObject {
                 }
             }
             await catchUpSendOperation(operationID, fallbackSessionID: initialSessionID, reason: "send complete")
-            finishSendOperation(operationID)
-            operationFinished = true
             if startsNewSession {
-                // The initial model/thinking changes are now persisted. Only
-                // now replace the optimistic default runtime with the server's
-                // authoritative state.
                 await refreshSelectedRuntimeAndModels()
                 pendingNewSessionModelPreference = nil
             }
             await reloadCatalog(quietly: true)
-            startSelectedSessionStreamIfPossible()
-            return true
         } catch {
+            // Once /input starts, retrying automatically could duplicate a turn:
+            // keepRunningOnDisconnect means the daemon may still commit it.
             statusMessage = error.localizedDescription
             await catchUpSendOperation(operationID, fallbackSessionID: initialSessionID, reason: "send error")
-            finishSendOperation(operationID)
-            operationFinished = true
-            startSelectedSessionStreamIfPossible()
-            return false
         }
+        finishSendOperation(operationID)
+        operationFinished = true
+        startSelectedSessionStreamIfPossible()
+        return .submitted
     }
 
     private func beginSendOperation(sessionID: String?) -> UUID {
@@ -1167,8 +1185,10 @@ final class MobilePiAppState: ObservableObject {
         let previousFirstLine = selectedFirstLine
         for rawEvent in page.events {
             let event = compactEventForMobileMemory(rawEvent)
-            selectedPersistedEventIDs.insert(event.id)
-            removeTransientEvent(matchingPersisted: event)
+            let isNewPersistedEvent = selectedPersistedEventIDs.insert(event.id).inserted
+            if isNewPersistedEvent {
+                removeTransientEvent(matchingPersisted: event)
+            }
             upsertSelectedEvent(event, allowPersistedToWin: true)
         }
         if let firstLine = page.firstLine {
@@ -1232,11 +1252,31 @@ final class MobilePiAppState: ObservableObject {
         sortSelectedEventsForDisplay()
     }
 
-    private func appendOptimisticUserMessage(_ prompt: String, attachments: [UploadedAttachmentReference]) {
+    private func appendOptimisticUserMessage(_ prompt: String, attachments: [ChatAttachment], operationID: UUID) {
+        var content: [ContentBlock] = attachments.map { attachment in
+            switch attachment.kind {
+            case .image:
+                return .image(path: attachment.filePath, mime: attachment.mimeType)
+            case .file:
+                return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[File attached: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
+            case .audio:
+                return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Audio attachment: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
+            }
+        }
+        content.append(.text(prompt))
+        upsertOptimisticUserMessage(content: content, operationID: operationID)
+    }
+
+    private func replaceOptimisticAttachments(operationID: UUID, prompt: String, attachments: [UploadedAttachmentReference]) {
+        guard selectedEvents.contains(where: { $0.id == optimisticEventID(operationID) }) else { return }
         var content = attachments.map { Self.optimisticContentBlock(for: $0) }
         content.append(.text(prompt))
+        upsertOptimisticUserMessage(content: content, operationID: operationID)
+    }
+
+    private func upsertOptimisticUserMessage(content: [ContentBlock], operationID: UUID) {
         let message = Message(
-            id: "optimistic-user-\(UUID().uuidString)",
+            id: optimisticMessageID(operationID),
             role: .user,
             content: content,
             model: nil,
@@ -1245,6 +1285,18 @@ final class MobilePiAppState: ObservableObject {
         )
         upsertSelectedEvent(compactEventForMobileMemory(.message(message, lineIndex: Int.max)), allowPersistedToWin: false)
         sortSelectedEventsForDisplay()
+    }
+
+    private func removeOptimisticUserMessage(operationID: UUID) {
+        selectedEvents.removeAll { $0.id == optimisticEventID(operationID) }
+    }
+
+    private func optimisticMessageID(_ operationID: UUID) -> String {
+        "optimistic-user-\(operationID.uuidString.lowercased())"
+    }
+
+    private func optimisticEventID(_ operationID: UUID) -> String {
+        "message:\(optimisticMessageID(operationID))"
     }
 
     private func compactEventForMobileMemory(_ event: SessionEvent) -> SessionEvent {
@@ -1303,7 +1355,7 @@ final class MobilePiAppState: ObservableObject {
         return "\(prefix)\n\n… \(label) truncated on iPhone to reduce memory (\(text.count) characters total). Open the session on Mac for the full content."
     }
 
-    private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment]) async throws -> [UploadedAttachmentReference] {
+    private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment], host: PiHostConfiguration) async throws -> [UploadedAttachmentReference] {
         guard !attachments.isEmpty else { return [] }
         let client = RemoteDaemonClient()
         var uploaded: [UploadedAttachmentReference] = []
@@ -1340,11 +1392,10 @@ final class MobilePiAppState: ObservableObject {
     }
 
     private func removeTransientEvent(matchingPersisted persistedEvent: SessionEvent) {
-        guard let index = selectedEvents.firstIndex(where: { existing in
+        selectedEvents.removeAll { existing in
             !selectedPersistedEventIDs.contains(existing.id)
                 && transientEvent(existing, matchesPersistedReplacement: persistedEvent)
-        }) else { return }
-        selectedEvents.remove(at: index)
+        }
     }
 
     private func transientEvent(_ transient: SessionEvent, matchesPersistedReplacement persisted: SessionEvent) -> Bool {
@@ -1352,6 +1403,11 @@ final class MobilePiAppState: ObservableObject {
         case (.message(let transientMessage, _), .message(let persistedMessage, _)):
             guard transientMessage.role == persistedMessage.role else { return false }
             if transientMessage.id == persistedMessage.id { return true }
+            let transientClientSendID = clientSendID(in: transientMessage)
+            let persistedClientSendID = clientSendID(in: persistedMessage)
+            if let transientClientSendID, let persistedClientSendID {
+                return transientClientSendID == persistedClientSendID
+            }
             let transientSignature = messageSignature(for: transientMessage)
             let persistedSignature = messageSignature(for: persistedMessage)
             if !transientSignature.isEmpty, transientSignature == persistedSignature {
@@ -1366,6 +1422,19 @@ final class MobilePiAppState: ObservableObject {
         default:
             return false
         }
+    }
+
+    private func clientSendID(in message: Message) -> String? {
+        for block in message.content {
+            guard case .text(let text) = block,
+                  let range = text.range(of: #"client-send-id=\"([^\"]+)\""#, options: .regularExpression) else { continue }
+            return String(text[range])
+                .replacingOccurrences(of: "client-send-id=\"", with: "")
+                .replacingOccurrences(of: "\"", with: "")
+                .lowercased()
+                .nilIfBlank
+        }
+        return nil
     }
 
     private func messageSignature(for message: Message) -> String {
@@ -1561,7 +1630,8 @@ final class MobilePiAppState: ObservableObject {
     private func sourceTaggedAppPrompt(
         _ text: String,
         sessionTitle: String,
-        modelPreference: DefaultModelPreference? = nil
+        modelPreference: DefaultModelPreference? = nil,
+        clientSendID: UUID? = nil
     ) -> String {
         if text.range(of: #"^\[source:[^\]]+\]"#, options: .regularExpression) != nil {
             return text
@@ -1572,13 +1642,16 @@ final class MobilePiAppState: ObservableObject {
         let thinking = selectedSession == nil
             ? (modelPreference?.thinkingLevel?.nilIfBlank ?? defaultThinkingDisplayName)
             : selectedThinkingLevel
-        let fields = [
+        var fields = [
             "source:pi-ios-app",
             "type=text",
             "session=\"\(Self.sourceTagValue(sessionTitle))\"",
             "model=\"\(Self.sourceTagValue(model))\"",
             "thinking=\"\(Self.sourceTagValue(thinking))\""
         ]
+        if let clientSendID {
+            fields.append("client-send-id=\"\(clientSendID.uuidString.lowercased())\"")
+        }
         return "[\(fields.joined(separator: " "))]\n\(text)"
     }
 

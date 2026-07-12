@@ -1063,17 +1063,22 @@ private struct MobileSessionDetailView: View {
     private func sendDraftToPi() {
         isComposerFocused = true
         let attachmentsToSend = draftAttachments
+        let submittedIDs = Set(attachmentsToSend.map(\.id))
+        // Transfer ownership to the send operation synchronously. New chips
+        // added while it runs stay in the composer and cannot be deleted by it.
+        draftAttachments.removeAll { submittedIDs.contains($0.id) }
         Task {
-            let sent = await appState.sendDraft(attachments: attachmentsToSend)
-            await MainActor.run {
-                if sent {
-                    if draftAttachments == attachmentsToSend {
-                        draftAttachments = []
-                    }
-                    cleanupAttachments(attachmentsToSend)
+            let outcome = await appState.sendDraft(attachments: attachmentsToSend)
+            switch outcome {
+            case .submitted:
+                cleanupAttachments(attachmentsToSend)
+            case .uploadFailed:
+                let restorable = attachmentsToSend.filter { FileManager.default.fileExists(atPath: $0.fileURL.path) }
+                for attachment in restorable where !draftAttachments.contains(where: { $0.id == attachment.id }) {
+                    draftAttachments.append(attachment)
                 }
-                isComposerFocused = true
             }
+            isComposerFocused = true
         }
     }
 
@@ -1869,6 +1874,10 @@ private struct MobileAttachmentImage: View {
         let data: Data?
         if path.hasPrefix("data:"), let comma = path.firstIndex(of: ",") {
             data = Data(base64Encoded: String(path[path.index(after: comma)...]))
+        } else if path.hasPrefix("/") {
+            // Operation-owned staging file used only by the immediate
+            // optimistic preview; the path is never rendered as text.
+            data = try? Data(contentsOf: URL(fileURLWithPath: path))
         } else if let id = Self.attachmentID(from: path) {
             data = try? await RemoteDaemonClient().downloadAttachment(
                 host: appState.host,
