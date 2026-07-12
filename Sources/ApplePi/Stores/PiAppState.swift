@@ -1040,11 +1040,12 @@ final class PiAppState: ObservableObject {
         _ prompt: String,
         attachments: [ChatAttachment] = [],
         in session: ChatSession,
-        onAccepted: (@MainActor () -> Void)? = nil
+        onAccepted: (@MainActor () -> Void)? = nil,
+        onUploadFailed: (@MainActor () -> Void)? = nil
     ) -> Bool {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard session.hasActiveSend, session.canAcceptSteering else {
-            return sendMessage(prompt, attachments: attachments, in: session, onAccepted: onAccepted)
+            return sendMessage(prompt, attachments: attachments, in: session, onAccepted: onAccepted, onUploadFailed: onUploadFailed)
         }
         guard !trimmed.isEmpty || !attachments.isEmpty else { return false }
         guard let sessionID = session.sessionID?.nilIfBlank else {
@@ -1052,18 +1053,34 @@ final class PiAppState: ObservableObject {
             return false
         }
         let effectivePrompt = trimmed.isEmpty ? "Please inspect the attached item(s)." : trimmed
-        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, session: session)
+        let operationID = UUID()
+        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, session: session, clientSendID: operationID)
         statusMessage = "Sending to Pi..."
         // UI-wise queued input is just another user message. The daemon decides
         // whether /input becomes a fresh turn or active-run steering; the app
         // should render the accepted prompt immediately in both cases.
-        session.appendSteeringPrompt(taggedPrompt, attachments: attachments)
+        session.appendSteeringPrompt(taggedPrompt, attachments: attachments, operationID: operationID)
         onAccepted?()
         let remoteAPIHost = host
         let steeringGeneration = session.currentSendGeneration
         Task { [weak self, weak session] in
+            guard let self else { return }
+            let daemonAttachments: [UploadedAttachmentReference]
             do {
-                let daemonAttachments = try await self?.uploadAttachmentsIfNeeded(attachments) ?? []
+                daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments, host: remoteAPIHost)
+                await MainActor.run {
+                    session?.replaceSteeringAttachments(operationID: operationID, prompt: taggedPrompt, attachments: daemonAttachments)
+                    attachments.forEach { try? FileManager.default.removeItem(at: $0.fileURL) }
+                }
+            } catch {
+                await MainActor.run {
+                    session?.removeOptimisticMessage(operationID: operationID)
+                    self.statusMessage = error.localizedDescription
+                    onUploadFailed?()
+                }
+                return
+            }
+            do {
                 try await RemoteDaemonClient().submitSessionInput(
                     host: remoteAPIHost,
                     sessionID: sessionID,
@@ -1071,7 +1088,7 @@ final class PiAppState: ObservableObject {
                     attachments: daemonAttachments
                 )
                 await MainActor.run {
-                    guard let self, let session,
+                    guard let session,
                           self.host == remoteAPIHost,
                           session.sessionID == sessionID,
                           session.currentSendGeneration == steeringGeneration,
@@ -1080,7 +1097,7 @@ final class PiAppState: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    guard let self, let session else { return }
+                    guard let session else { return }
                     self.statusMessage = error.localizedDescription
                     if let remoteError = error as? RemoteDaemonError,
                        case .requestFailed(let status, _) = remoteError,
@@ -1107,14 +1124,16 @@ final class PiAppState: ObservableObject {
         _ prompt: String,
         attachments: [ChatAttachment] = [],
         in session: ChatSession,
-        onAccepted: (@MainActor () -> Void)? = nil
+        onAccepted: (@MainActor () -> Void)? = nil,
+        onUploadFailed: (@MainActor () -> Void)? = nil
     ) -> Bool {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return false }
         let effectivePrompt = trimmed.isEmpty ? "Please inspect the attached item(s)." : trimmed
-        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, session: session)
+        let operationID = UUID()
+        let taggedPrompt = sourceTaggedAppPrompt(effectivePrompt, session: session, clientSendID: operationID)
         if session.hasActiveSend && session.canAcceptSteering {
-            return steerMessage(prompt, attachments: attachments, in: session, onAccepted: onAccepted)
+            return steerMessage(prompt, attachments: attachments, in: session, onAccepted: onAccepted, onUploadFailed: onUploadFailed)
         }
         if session.isSending || session.isAwaitingTurnCommit || session.hasActiveSend {
             // If the live run is no longer steerable, generation has ended and
@@ -1141,7 +1160,7 @@ final class PiAppState: ObservableObject {
                 "promptChars": String(effectivePrompt.count)
             ]
         )
-        session.beginSending(prompt: taggedPrompt, attachments: attachments)
+        session.beginSending(prompt: taggedPrompt, attachments: attachments, operationID: operationID)
         let sendGeneration = session.currentSendGeneration
         let initialAliases = sessionAliases(for: session)
         markSessionActive(initialAliases)
@@ -1158,6 +1177,7 @@ final class PiAppState: ObservableObject {
                     session: session,
                     prompt: taggedPrompt,
                     attachments: attachments,
+                    operationID: operationID,
                     sendGeneration: sendGeneration
                 )
             } else {
@@ -1169,7 +1189,8 @@ final class PiAppState: ObservableObject {
                     session: session,
                     sendGeneration: sendGeneration,
                     initialAliases: initialAliases,
-                    appState: self
+                    appState: self,
+                    onUploadFailed: onUploadFailed
                 )
             }
         }
@@ -1185,12 +1206,14 @@ final class PiAppState: ObservableObject {
     fileprivate enum SendOutcome: Sendable {
         case success
         case cancelled
+        case uploadFailure(String)
         case failure(String)
 
         var diagnosticsName: String {
             switch self {
             case .success: return "success"
             case .cancelled: return "cancelled"
+            case .uploadFailure: return "uploadFailure"
             case .failure: return "failure"
             }
         }
@@ -1205,7 +1228,8 @@ final class PiAppState: ObservableObject {
         session: ChatSession?,
         sendGeneration: Int,
         initialAliases: [String],
-        appState: PiAppState?
+        appState: PiAppState?,
+        onUploadFailed: (@MainActor () -> Void)? = nil
     ) {
         defer {
             if session?.currentSendGeneration == sendGeneration {
@@ -1243,6 +1267,12 @@ final class PiAppState: ObservableObject {
             if !wasAborted {
                 appState?.removeOptimisticSidebarSessionIfNeeded(matching: initialAliases)
             }
+        case .uploadFailure(let message):
+            session.finishSendingWithError(message)
+            let aliases = appState?.sessionAliases(for: session, fallback: initialAliases) ?? initialAliases
+            appState?.setSessionSending(false, aliases: aliases)
+            appState?.statusMessage = message
+            onUploadFailed?()
         case .failure(let message):
             session.finishSendingWithError(message)
             let aliases = appState?.sessionAliases(for: session, fallback: initialAliases) ?? initialAliases
@@ -1262,6 +1292,7 @@ final class PiAppState: ObservableObject {
         session: ChatSession?,
         prompt: String,
         attachments: [ChatAttachment],
+        operationID: UUID,
         sendGeneration: Int
     ) async -> SendOutcome {
         let startedAt = Date()
@@ -1276,14 +1307,25 @@ final class PiAppState: ObservableObject {
                 "attachments": String(attachments.count)
             ]
         )
+        let remoteAPIHost = host
+        let daemonAttachments: [UploadedAttachmentReference]
         do {
-            let daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments)
+            daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments, host: remoteAPIHost)
+            await MainActor.run {
+                session?.replaceOptimisticAttachments(operationID: operationID, prompt: prompt, attachments: daemonAttachments)
+                attachments.forEach { try? FileManager.default.removeItem(at: $0.fileURL) }
+            }
+        } catch {
+            await MainActor.run { session?.removeOptimisticMessage(operationID: operationID) }
+            return .uploadFailure(error.localizedDescription)
+        }
+        do {
             // Remote turns must survive transient app/network loss; pi-appd persists JSONL
             // and the UI catches up later. Keep this explicit, source-tag heuristic is fallback only.
             let keepRunningOnDisconnect = true
             if let sessionID = session?.sessionID?.nilIfBlank {
                 try await RemoteDaemonClient().streamSend(
-                    host: self.host,
+                    host: remoteAPIHost,
                     sessionID: sessionID,
                     prompt: prompt,
                     attachments: daemonAttachments,
@@ -1300,7 +1342,7 @@ final class PiAppState: ObservableObject {
             } else if let launchRequest = session?.launchRequest {
                 let effectiveLaunchRequest = await remoteLaunchRequestApplyingFreshDefaults(launchRequest)
                 try await RemoteDaemonClient().streamNewSession(
-                    host: self.host,
+                    host: remoteAPIHost,
                     request: effectiveLaunchRequest,
                     prompt: prompt,
                     attachments: daemonAttachments,
@@ -2909,20 +2951,21 @@ final class PiAppState: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
-    private func sourceTaggedAppPrompt(_ text: String, session: ChatSession) -> String {
+    private func sourceTaggedAppPrompt(_ text: String, session: ChatSession, clientSendID: UUID? = nil) -> String {
         if text.range(of: #"^\[source:[^\]]+\]"#, options: .regularExpression) != nil {
             return text
         }
         let runtime = session.runtimeState
         let model = runtime?.modelID?.nilIfBlank ?? session.launchRequest?.initialModelID ?? "unknown"
         let thinking = runtime?.thinkingLevel.nilIfBlank ?? session.launchRequest?.initialThinkingLevel ?? "off"
-        let fields = [
+        var fields = [
             "source:pi-macos-app",
             "type=text",
             "session=\"\(Self.sourceTagValue(session.title))\"",
             "model=\"\(Self.sourceTagValue(model))\"",
             "thinking=\"\(Self.sourceTagValue(thinking))\""
         ]
+        if let clientSendID { fields.append("client-send-id=\"\(clientSendID.uuidString.lowercased())\"") }
         return "[\(fields.joined(separator: " "))]\n\(text)"
     }
 
@@ -3256,7 +3299,7 @@ final class PiAppState: ObservableObject {
         return false
     }
 
-    private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment]) async throws -> [UploadedAttachmentReference] {
+    private func uploadAttachmentsIfNeeded(_ attachments: [ChatAttachment], host: PiHostConfiguration) async throws -> [UploadedAttachmentReference] {
         guard !attachments.isEmpty else { return [] }
         var uploaded: [UploadedAttachmentReference] = []
         let client = RemoteDaemonClient()

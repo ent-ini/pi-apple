@@ -22,18 +22,24 @@ private struct BubbleWidthModifier: ViewModifier {
 
 private struct UserVisibleAttachment: Identifiable, Hashable {
     enum Kind: Hashable {
-        case image(path: String, mime: String?)
-        case file(path: String, displayName: String, isAudio: Bool)
+        case image(path: String, mime: String?, attachmentID: String?, displayName: String)
+        case file(path: String, displayName: String, isAudio: Bool, attachmentID: String?, mime: String?)
     }
 
     let kind: Kind
 
     var id: String {
         switch kind {
-        case .image(let path, _):
-            return "image:\(path)"
-        case .file(let path, let displayName, let isAudio):
-            return "file:\(path):\(displayName):\(isAudio)"
+        case .image(let path, _, let attachmentID, _):
+            return "image:\(attachmentID ?? path)"
+        case .file(let path, _, let isAudio, let attachmentID, _):
+            return "file:\(attachmentID ?? path):\(isAudio)"
+        }
+    }
+
+    var attachmentID: String? {
+        switch kind {
+        case .image(_, _, let id, _), .file(_, _, _, let id, _): return id
         }
     }
 }
@@ -83,14 +89,18 @@ private struct UserMessagePresentation {
                     textFragments.append(extraction.text)
                 }
             case .image(let path, let mime):
-                explicitImages.append(.init(kind: .image(path: path, mime: mime)))
+                explicitImages.append(.init(kind: .image(path: path, mime: mime, attachmentID: nil, displayName: "Image")))
             case .thinking:
                 continue
             }
         }
 
+        let hasAuthoritativeImage = extractedAttachments.contains { attachment in
+            if case .image(_, _, let attachmentID, _) = attachment.kind { return attachmentID != nil }
+            return false
+        }
         return UserMessagePresentation(
-            attachments: deduplicate(explicitImages + extractedAttachments),
+            attachments: deduplicate((hasAuthoritativeImage ? [] : explicitImages) + extractedAttachments),
             text: normalizeVisibleText(textFragments.joined(separator: "\n\n"))
         )
     }
@@ -114,7 +124,7 @@ private struct UserMessagePresentation {
     }
 
     private static func extractAttachmentsAndText(from rawText: String, includeImageTags: Bool) -> Extraction {
-        let pattern = #"<file\s+name=\"([^\"]+)\"[^>]*>([\s\S]*?)</file>"#
+        let pattern = #"<file\s+name=\"([^\"]+)\"([^>]*)>([\s\S]*?)</file>"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return Extraction(attachments: [], text: sanitizeTextOnly(rawText))
         }
@@ -132,9 +142,10 @@ private struct UserMessagePresentation {
             guard let fullRange = Range(match.range(at: 0), in: cleaned) else { continue }
 
             let path = substring(in: cleaned, nsRange: match.range(at: 1)).map(xmlUnescape) ?? ""
-            let body = substring(in: cleaned, nsRange: match.range(at: 2)).map(xmlUnescape) ?? ""
+            let attributes = substring(in: cleaned, nsRange: match.range(at: 2)) ?? ""
+            let body = substring(in: cleaned, nsRange: match.range(at: 3)).map(xmlUnescape) ?? ""
 
-            if let attachment = makeAttachment(path: path, body: body, includeImageTags: includeImageTags) {
+            if let attachment = makeAttachment(path: path, attributes: attributes, body: body, includeImageTags: includeImageTags) {
                 attachments.append(attachment)
             }
 
@@ -148,24 +159,31 @@ private struct UserMessagePresentation {
         )
     }
 
-    private static func makeAttachment(path: String, body: String, includeImageTags: Bool) -> UserVisibleAttachment? {
+    private static func makeAttachment(path: String, attributes: String, body: String, includeImageTags: Bool) -> UserVisibleAttachment? {
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else { return nil }
-
-        let isImage = isImageAttachment(path: trimmedPath, body: body)
+        let attachmentID = attribute("attachment-id", in: attributes)
+        let mime = attribute("attachment-mime", in: attributes) ?? guessImageMimeType(from: trimmedPath)
+        let pathName = URL(fileURLWithPath: trimmedPath).lastPathComponent
+        let displayName = attribute("attachment-name", in: attributes)
+            ?? (pathName.isEmpty ? "Attachment" : pathName)
+        let isImage = mime?.lowercased().hasPrefix("image/") == true || isImageAttachment(path: trimmedPath, body: body)
         if isImage {
-            guard includeImageTags else { return nil }
-            return UserVisibleAttachment(kind: .image(path: trimmedPath, mime: guessImageMimeType(from: trimmedPath)))
+            guard includeImageTags || attachmentID != nil else { return nil }
+            return UserVisibleAttachment(kind: .image(path: trimmedPath, mime: mime, attachmentID: attachmentID, displayName: displayName))
         }
-
-        let displayName = URL(fileURLWithPath: trimmedPath).lastPathComponent
+        let isAudio = mime?.lowercased().hasPrefix("audio/") == true || isAudioPath(trimmedPath)
         return UserVisibleAttachment(
-            kind: .file(
-                path: trimmedPath,
-                displayName: displayName.isEmpty ? trimmedPath : displayName,
-                isAudio: isAudioPath(trimmedPath)
-            )
+            kind: .file(path: trimmedPath, displayName: displayName, isAudio: isAudio, attachmentID: attachmentID, mime: mime)
         )
+    }
+
+    private static func attribute(_ name: String, in value: String) -> String? {
+        let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: name) + #"=\"([^\"]+)\""#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range(at: 1), in: value) else { return nil }
+        return xmlUnescape(String(value[range])).nilIfBlank
     }
 
     private static func isImageAttachment(path: String, body: String) -> Bool {
@@ -316,6 +334,114 @@ private final class ChatImageCache: @unchecked Sendable {
     }
 }
 
+private struct MacUserAttachmentView: View {
+    @EnvironmentObject private var appState: PiAppState
+    let attachment: UserVisibleAttachment
+    let isUserMessage: Bool
+    @State private var previewImage: NSImage?
+    @State private var isLoading = false
+    @State private var errorText: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let previewImage {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 280, maxHeight: 280)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: iconName).font(.system(size: 18, weight: .medium))
+                    Text(displayName).font(.subheadline).lineLimit(2)
+                    if isLoading { ProgressView().controlSize(.small) }
+                    Spacer(minLength: 0)
+                    if attachment.attachmentID != nil {
+                        Button("Open") { openAttachment() }.buttonStyle(.borderless)
+                        Button("Save") { saveAttachment() }.buttonStyle(.borderless)
+                    }
+                }
+                .frame(maxWidth: 320, alignment: .leading)
+            }
+            if let errorText {
+                Text(errorText).font(.caption).foregroundStyle(.red).lineLimit(2)
+            }
+        }
+        .padding(10)
+        .background(Color.black.opacity(isUserMessage ? 0.12 : 0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .task(id: attachment.id) { await loadImagePreviewIfNeeded() }
+    }
+
+    private var displayName: String {
+        switch attachment.kind {
+        case .image(_, _, _, let name), .file(_, let name, _, _, _): return name
+        }
+    }
+
+    private var iconName: String {
+        switch attachment.kind {
+        case .image: return "photo"
+        case .file(_, _, let isAudio, _, _): return isAudio ? "waveform" : "doc"
+        }
+    }
+
+    private func loadImagePreviewIfNeeded() async {
+        guard case .image(let path, _, let attachmentID, _) = attachment.kind else { return }
+        isLoading = true
+        defer { isLoading = false }
+        let data: Data?
+        if let attachmentID {
+            data = try? await RemoteDaemonClient().downloadAttachment(host: appState.host, id: attachmentID).data
+        } else if path.hasPrefix("data:"), let comma = path.firstIndex(of: ",") {
+            data = Data(base64Encoded: String(path[path.index(after: comma)...]))
+        } else if path.hasPrefix("/") {
+            data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        } else {
+            data = nil
+        }
+        guard !Task.isCancelled else { return }
+        previewImage = data.flatMap { NSImage(data: $0) }
+    }
+
+    private func fetch() async throws -> RemoteFileDownload {
+        guard let attachmentID = attachment.attachmentID else {
+            throw RemoteDaemonError.requestFailed(status: 404, body: "Attachment is not available remotely.")
+        }
+        return try await RemoteDaemonClient().downloadAttachment(host: appState.host, id: attachmentID)
+    }
+
+    private func openAttachment() {
+        Task {
+            do {
+                let file = try await fetch()
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-app-attachments", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let url = directory.appendingPathComponent("\(UUID().uuidString)-\(safeName(file.fileName))")
+                try file.data.write(to: url, options: .atomic)
+                NSWorkspace.shared.open(url)
+            } catch { errorText = error.localizedDescription }
+        }
+    }
+
+    private func saveAttachment() {
+        Task {
+            do {
+                let file = try await fetch()
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = safeName(file.fileName)
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                try file.data.write(to: url, options: .atomic)
+            } catch { errorText = error.localizedDescription }
+        }
+    }
+
+    private func safeName(_ value: String) -> String {
+        value.components(separatedBy: CharacterSet(charactersIn: "/:\\"))
+            .filter { !$0.isEmpty }.joined(separator: "-").nilIfBlank ?? "attachment"
+    }
+}
+
 /// One chat bubble. User messages are right-aligned with the accent
 /// background; assistant messages span almost the full width with a
 /// neutral surface so long responses are easy to read.
@@ -383,38 +509,8 @@ struct MessageBubble: View {
         }
     }
 
-    @ViewBuilder
     private func userAttachmentView(_ attachment: UserVisibleAttachment) -> some View {
-        switch attachment.kind {
-        case .image(let path, _):
-            if let image = resolvedImage(for: path) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 240, maxHeight: 240)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            } else {
-                attachmentCard(systemImage: "photo", title: "Image")
-            }
-        case .file(_, let displayName, let isAudio):
-            attachmentCard(systemImage: isAudio ? "waveform" : "doc", title: displayName)
-        }
-    }
-
-    private func attachmentCard(systemImage: String, title: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.system(size: 18, weight: .medium))
-            Text(title)
-                .font(.subheadline)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-        }
-        .frame(maxWidth: 240, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(message.role == .user ? 0.12 : 0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        MacUserAttachmentView(attachment: attachment, isUserMessage: message.role == .user)
     }
 
     @ViewBuilder
@@ -637,13 +733,10 @@ struct MessageBubble: View {
 
     private func copyText(for attachment: UserVisibleAttachment) -> String {
         switch attachment.kind {
-        case .image(let path, let mime):
-            if let mime {
-                return "[image: \(path), \(mime)]"
-            }
-            return "[image: \(path)]"
-        case .file(let path, let displayName, let isAudio):
-            return "[\(isAudio ? "audio" : "file"): \(displayName) — \(path)]"
+        case .image(_, _, _, let displayName):
+            return "[image attachment: \(displayName)]"
+        case .file(_, let displayName, let isAudio, _, _):
+            return "[\(isAudio ? "audio" : "file") attachment: \(displayName)]"
         }
     }
 

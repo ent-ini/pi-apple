@@ -534,13 +534,29 @@ struct ChatSessionView: View {
         guard canSend else { return }
         let promptToSend = prompt
         let attachmentsToSend = draftAttachments
-        _ = appState.sendMessage(promptToSend, attachments: attachmentsToSend, in: session) {
-            guard session.draftText.trimmingCharacters(in: .whitespacesAndNewlines) == promptToSend,
-                  draftAttachments == attachmentsToSend else { return }
-            session.draftText = ""
-            session.draftHeight = 30
-            draftAttachments = []
-        }
+        let submittedIDs = Set(attachmentsToSend.map(\.id))
+        _ = appState.sendMessage(
+            promptToSend,
+            attachments: attachmentsToSend,
+            in: session,
+            onAccepted: {
+                if session.draftText.trimmingCharacters(in: .whitespacesAndNewlines) == promptToSend {
+                    session.draftText = ""
+                    session.draftHeight = 30
+                }
+                draftAttachments.removeAll { submittedIDs.contains($0.id) }
+            },
+            onUploadFailed: {
+                if session.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    session.draftText = promptToSend
+                }
+                for attachment in attachmentsToSend
+                where FileManager.default.fileExists(atPath: attachment.fileURL.path)
+                    && !draftAttachments.contains(where: { $0.id == attachment.id }) {
+                    draftAttachments.append(attachment)
+                }
+            }
+        )
     }
 
     private func handleAbortCommand() {
@@ -556,6 +572,7 @@ struct ChatSessionView: View {
     private func clearComposer() {
         session.draftText = ""
         session.draftHeight = 30
+        cleanupAttachments(draftAttachments)
         draftAttachments = []
     }
 
@@ -706,10 +723,12 @@ struct ChatSessionView: View {
 
     private func addAttachments(from urls: [URL]) {
         guard !urls.isEmpty else { return }
+        var staged: [ChatAttachment] = []
         do {
-            let staged = try urls.map { try attachmentStagingService.stageFile(at: $0) }
+            for url in urls { staged.append(try attachmentStagingService.stageFile(at: url)) }
             appendAttachments(staged)
         } catch {
+            cleanupAttachments(staged)
             appState.statusMessage = error.localizedDescription
         }
     }

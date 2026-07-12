@@ -211,7 +211,7 @@ final class ChatSession: ObservableObject, Identifiable {
         self.availableModels = availableModels
     }
 
-    func beginSending(prompt: String, attachments: [ChatAttachment] = []) {
+    func beginSending(prompt: String, attachments: [ChatAttachment] = [], operationID: UUID = UUID()) {
         loadError = nil
         sendGeneration &+= 1
         didAbortCurrentSend = false
@@ -244,7 +244,7 @@ final class ChatSession: ObservableObject, Identifiable {
 
         let userEvent = SessionEvent.message(
             Message(
-                id: UUID().uuidString,
+                id: "optimistic-user-\(operationID.uuidString.lowercased())",
                 role: .user,
                 content: content,
                 model: nil,
@@ -268,6 +268,41 @@ final class ChatSession: ObservableObject, Identifiable {
         )
         transientStreamEvents = []
         rebuildEvents()
+    }
+
+    func replaceOptimisticAttachments(operationID: UUID, prompt: String, attachments: [UploadedAttachmentReference]) {
+        let messageID = "optimistic-user-\(operationID.uuidString.lowercased())"
+        guard case .message(let existing, let lineIndex)? = transientUserEvent,
+              existing.id == messageID else { return }
+        var content = attachments.map(Self.optimisticContentBlock)
+        if !prompt.isEmpty { content.append(.text(prompt)) }
+        transientUserEvent = .message(
+            Message(id: messageID, role: .user, content: content, model: nil, timestamp: existing.timestamp, parentId: nil),
+            lineIndex: lineIndex
+        )
+        rebuildEvents()
+    }
+
+    func removeOptimisticMessage(operationID: UUID) {
+        let messageID = "optimistic-user-\(operationID.uuidString.lowercased())"
+        if case .message(let message, _)? = transientUserEvent, message.id == messageID {
+            transientUserEvent = nil
+        }
+        transientStreamEvents.removeAll { event in
+            if case .message(let message, _) = event { return message.id == messageID }
+            return false
+        }
+        rebuildEvents()
+    }
+
+    private static func optimisticContentBlock(_ attachment: UploadedAttachmentReference) -> ContentBlock {
+        let name = attachment.fileName.xmlEscapedForPrompt
+        let mime = attachment.mimeType ?? "application/octet-stream"
+        guard let id = attachment.id?.nilIfBlank else { return .text("[File attached: \(name)]") }
+        let reference = "pi-attachment://\(id)/\(name)"
+        if mime.lowercased().hasPrefix("image/") { return .image(path: reference, mime: mime) }
+        let label = mime.lowercased().hasPrefix("audio/") ? "Audio attachment" : "File attached"
+        return .text("<file name=\"\(reference)\" attachment-id=\"\(id)\" attachment-name=\"\(name)\" attachment-mime=\"\(mime.xmlEscapedForPrompt)\">[\(label): \(name)]</file>")
     }
 
     @discardableResult
@@ -339,7 +374,7 @@ final class ChatSession: ObservableObject, Identifiable {
         rebuildEvents()
     }
 
-    func appendSteeringPrompt(_ prompt: String, attachments: [ChatAttachment] = []) {
+    func appendSteeringPrompt(_ prompt: String, attachments: [ChatAttachment] = [], operationID: UUID = UUID()) {
         var content: [ContentBlock] = attachments.map { attachment in
             switch attachment.kind {
             case .image:
@@ -355,7 +390,7 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         let event = SessionEvent.message(
             Message(
-                id: UUID().uuidString,
+                id: "optimistic-user-\(operationID.uuidString.lowercased())",
                 role: .user,
                 content: content,
                 model: nil,
@@ -367,6 +402,21 @@ final class ChatSession: ObservableObject, Identifiable {
         recordTransientReconciliationFloor(for: event)
         upsertTransientStreamEvent(event, into: &transientStreamEvents)
         statusMessage = "Steering..."
+        rebuildEvents()
+    }
+
+    func replaceSteeringAttachments(operationID: UUID, prompt: String, attachments: [UploadedAttachmentReference]) {
+        let messageID = "optimistic-user-\(operationID.uuidString.lowercased())"
+        guard let index = transientStreamEvents.firstIndex(where: { event in
+            if case .message(let message, _) = event { return message.id == messageID }
+            return false
+        }), case .message(let existing, let lineIndex) = transientStreamEvents[index] else { return }
+        var content = attachments.map(Self.optimisticContentBlock)
+        if !prompt.isEmpty { content.append(.text(prompt)) }
+        transientStreamEvents[index] = .message(
+            Message(id: messageID, role: .user, content: content, model: nil, timestamp: existing.timestamp, parentId: nil),
+            lineIndex: lineIndex
+        )
         rebuildEvents()
     }
 
@@ -887,6 +937,11 @@ final class ChatSession: ObservableObject, Identifiable {
         case (.message(let transientMessage, _), .message(let persistedMessage, let persistedLineIndex)):
             guard transientMessage.role == persistedMessage.role else { return false }
             if transientMessage.id == persistedMessage.id { return true }
+            let transientClientSendID = clientSendID(in: transientMessage)
+            let persistedClientSendID = clientSendID(in: persistedMessage)
+            if let transientClientSendID, let persistedClientSendID {
+                return transientClientSendID == persistedClientSendID
+            }
             guard canUseContentFallback(forTransient: transient, persistedLineIndex: persistedLineIndex) else {
                 return false
             }
@@ -1114,6 +1169,18 @@ final class ChatSession: ObservableObject, Identifiable {
 
             return persistedMessage.content == transientMessage.content
         }
+    }
+
+    private func clientSendID(in message: Message) -> String? {
+        for block in message.content {
+            guard case .text(let text) = block,
+                  let range = text.range(of: #"client-send-id=\"([^\"]+)\""#, options: .regularExpression) else { continue }
+            return String(text[range])
+                .replacingOccurrences(of: "client-send-id=\"", with: "")
+                .replacingOccurrences(of: "\"", with: "")
+                .lowercased().nilIfBlank
+        }
+        return nil
     }
 
     private func messageSignature(for message: Message) -> String {
