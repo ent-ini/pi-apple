@@ -68,7 +68,7 @@ func TestOutboundAttachmentReferenceIsStoredOncePerMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := &server{agentDir: dir, attachments: store}
-	raw := `{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"Ready: @artifacts/report.txt."}]}}`
+	raw := `{"type":"message_end","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"Ready: @artifacts/report.txt."}]}}`
 	session := sessionRecord{ID: "session-1", WorkingDirectory: dir}
 
 	first := srv.decorateOutboundAttachmentRecord(context.Background(), session, raw)

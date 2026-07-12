@@ -2040,7 +2040,11 @@ func (s *server) decorateOutboundAttachmentRecords(ctx context.Context, session 
 
 func (s *server) decorateOutboundAttachmentRecord(ctx context.Context, session sessionRecord, raw string) string {
 	var event map[string]any
-	if json.Unmarshal([]byte(raw), &event) != nil || stringValue(event, "type") != "message" {
+	if json.Unmarshal([]byte(raw), &event) != nil {
+		return raw
+	}
+	eventType := stringValue(event, "type")
+	if eventType != "message" && eventType != "message_update" && eventType != "message_end" {
 		return raw
 	}
 	message, ok := event["message"].(map[string]any)
@@ -2547,6 +2551,15 @@ func (s *server) streamPiRPCCommand(
 					}
 				}
 				continue
+			}
+			// The RPC stream reaches a client before its JSONL tail/SSE catch-up.
+			// Decorate assistant @paths here as well, otherwise the client first
+			// renders a raw daemon path and only replaces it after the next page.
+			if binding != nil && strings.TrimSpace(binding.SessionID) != "" {
+				rawLine = s.decorateOutboundAttachmentRecord(context.Background(), sessionRecord{
+					ID:               binding.SessionID,
+					WorkingDirectory: firstNonBlank(binding.WorkingDirectory, fallbackWorkingDirectory, cwd),
+				}, rawLine)
 			}
 			_, _ = io.WriteString(w, rawLine)
 			_, _ = io.WriteString(w, "\n")
