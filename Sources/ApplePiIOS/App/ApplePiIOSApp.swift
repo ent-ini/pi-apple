@@ -452,6 +452,14 @@ final class MobilePiAppState: ObservableObject {
     }
 
     func refreshSelectedRuntimeAndModels() async {
+        // A newly created session is still being initialized when the
+        // session_bound event arrives. Its JSONL may not contain the explicit
+        // model/thinking commands yet, so loading runtime here can overwrite
+        // the default selected for the new chat with stale/empty state.
+        // Refresh after the initial send has been committed instead.
+        if isSending, selectedPendingNewSessionSendID != nil {
+            return
+        }
         guard let sessionID = selectedSession?.id.nilIfBlank else {
             selectedRuntime = defaultRuntimeForDisplay
             availableModels = cachedSelectableAvailableModels
@@ -715,6 +723,10 @@ final class MobilePiAppState: ObservableObject {
             initialSessionID: initialSessionID,
             startedNewSession: startsNewSession
         )
+        // Capture the preference for this turn. Attachment uploads suspend the
+        // task and the user can change Settings while they are in flight.
+        let launchPreference = defaultModelPreference
+        var operationFinished = false
         draft = ""
         if startsNewSession {
             selectedPendingNewSessionSendID = operationID
@@ -722,7 +734,11 @@ final class MobilePiAppState: ObservableObject {
             resetSelectedTranscript()
         }
         appendOptimisticUserMessage(taggedPrompt, attachments: attachments)
-        defer { finishSendOperation(operationID) }
+        defer {
+            if !operationFinished {
+                finishSendOperation(operationID)
+            }
+        }
 
         let host = host
         do {
@@ -733,24 +749,34 @@ final class MobilePiAppState: ObservableObject {
                 }
             } else {
                 var request = PiLaunchRequest(workingDirectory: host.defaultWorkingDirectory)
-                if let defaultModelPreference {
-                    request.initialModelProvider = defaultModelPreference.provider
-                    request.initialModelID = defaultModelPreference.modelID
-                    request.initialThinkingLevel = defaultModelPreference.thinkingLevel
+                if let launchPreference {
+                    request.initialModelProvider = launchPreference.provider
+                    request.initialModelID = launchPreference.modelID
+                    request.initialThinkingLevel = launchPreference.thinkingLevel
                     request.hasExplicitInitialModel = true
-                    request.hasExplicitInitialThinkingLevel = defaultModelPreference.thinkingLevel?.nilIfBlank != nil
+                    request.hasExplicitInitialThinkingLevel = launchPreference.thinkingLevel?.nilIfBlank != nil
                 }
                 try await RemoteDaemonClient().streamNewSession(host: host, request: request, prompt: taggedPrompt, attachments: uploadedAttachments, keepRunningOnDisconnect: true) { event in
                     await self.handleTurnStreamEvent(event, context: context)
                 }
             }
             await catchUpSendOperation(operationID, fallbackSessionID: initialSessionID, reason: "send complete")
+            finishSendOperation(operationID)
+            operationFinished = true
+            if startsNewSession {
+                // The initial model/thinking changes are now persisted. Only
+                // now replace the optimistic default runtime with the server's
+                // authoritative state.
+                await refreshSelectedRuntimeAndModels()
+            }
             await reloadCatalog(quietly: true)
             startSelectedSessionStreamIfPossible()
             return true
         } catch {
             statusMessage = error.localizedDescription
             await catchUpSendOperation(operationID, fallbackSessionID: initialSessionID, reason: "send error")
+            finishSendOperation(operationID)
+            operationFinished = true
             startSelectedSessionStreamIfPossible()
             return false
         }
