@@ -1177,13 +1177,29 @@ public struct RemoteDaemonClient: Sendable {
 
     private static func fileNameFromContentDisposition(_ value: String?) -> String? {
         guard let value else { return nil }
-        let pattern = #"filename=\"([^\"]+)\""#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-              let range = Range(match.range(at: 1), in: value) else {
-            return nil
+        // Go's mime.FormatMediaType correctly emits an unquoted token for
+        // ordinary names (`filename=notes.md`) and a quoted value only when
+        // needed. Accept both forms; otherwise Quick Look gets the fallback
+        // name "attachment" without an extension and cannot preview Markdown.
+        for parameter in value.split(separator: ";").dropFirst() {
+            let pair = parameter.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let equals = pair.firstIndex(of: "=") else { continue }
+            let name = String(pair[..<equals]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            var raw = String(pair[pair.index(after: equals)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if name == "filename*" {
+                if let marker = raw.range(of: "''") {
+                    raw = String(raw[marker.upperBound...]).removingPercentEncoding ?? raw
+                }
+            } else if name != "filename" {
+                continue
+            }
+            if raw.hasPrefix("\"") && raw.hasSuffix("\"") && raw.count >= 2 {
+                raw.removeFirst()
+                raw.removeLast()
+            }
+            if let fileName = raw.nilIfBlank { return fileName }
         }
-        return String(value[range]).nilIfBlank
+        return nil
     }
 
     private static func makeCatalogDecoder() -> JSONDecoder {

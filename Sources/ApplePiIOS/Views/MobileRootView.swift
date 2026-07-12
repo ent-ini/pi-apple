@@ -930,6 +930,12 @@ private struct MobileSessionDetailView: View {
                     } label: {
                         Label("Choose File", systemImage: "folder")
                     }
+
+                    #if canImport(UIKit)
+                    Button(action: pasteAttachmentsFromClipboard) {
+                        Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
+                    }
+                    #endif
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 18, weight: .semibold))
@@ -944,6 +950,11 @@ private struct MobileSessionDetailView: View {
                     .focused($isComposerFocused)
                     .padding(.vertical, 8)
                     .foregroundStyle(appState.appearance.textColor(for: resolvedColorScheme))
+                    #if canImport(UIKit)
+                    .onPasteCommand(of: [.image, .fileURL]) { providers in
+                        importPastedItemProviders(providers)
+                    }
+                    #endif
 
                 MobileComposerIconButton(systemName: audioRecorder.isRecording ? "stop.fill" : "mic.fill", isDisabled: isTranscribingAudio) {
                     handleMicrophoneTapped()
@@ -1259,6 +1270,85 @@ private struct MobileSessionDetailView: View {
             draftAttachments.append(attachment)
         }
     }
+
+    #if canImport(UIKit)
+    private func pasteAttachmentsFromClipboard() {
+        let pasteboard = UIPasteboard.general
+        if let image = pasteboard.image {
+            importPastedImage(image)
+            return
+        }
+        if let url = pasteboard.url, url.isFileURL {
+            addAttachments(from: [url])
+            return
+        }
+        importPastedItemProviders(pasteboard.itemProviders)
+    }
+
+    private func importPastedItemProviders(_ providers: [NSItemProvider]) {
+        guard !providers.isEmpty else {
+            appState.showStatus("Clipboard does not contain a file or image.")
+            return
+        }
+        for provider in providers {
+            importPastedItemProvider(provider)
+        }
+    }
+
+    private func importPastedItemProvider(_ provider: NSItemProvider) {
+        let types = provider.registeredTypeIdentifiers.compactMap(UTType.init(identifier:))
+        if let imageType = types.first(where: { $0.conforms(to: .image) }) {
+            provider.loadDataRepresentation(forTypeIdentifier: imageType.identifier) { data, error in
+                guard let data, error == nil else { return }
+                let extensionName = imageType.preferredFilenameExtension ?? "png"
+                do {
+                    let attachment = try MobileAttachmentStagingService.stageImageData(
+                        data,
+                        suggestedName: "pasted-\(UUID().uuidString).\(extensionName)",
+                        contentType: imageType
+                    )
+                    Task { @MainActor in self.appendAttachments([attachment]) }
+                } catch {
+                    Task { @MainActor in self.appState.showStatus(error.localizedDescription) }
+                }
+            }
+            return
+        }
+
+        // File providers usually expose public.file-url. If they expose their
+        // concrete type instead (PDF, archive, etc.), load that representation
+        // directly and stage it before the system invalidates the temporary URL.
+        let fileType = types.first(where: { $0.conforms(to: .fileURL) })
+            ?? types.first(where: { !$0.conforms(to: .text) && !$0.conforms(to: .image) })
+        guard let fileType else { return }
+        provider.loadFileRepresentation(forTypeIdentifier: fileType.identifier) { url, error in
+            guard let url, error == nil else { return }
+            do {
+                let attachment = try MobileAttachmentStagingService.stageFile(at: url)
+                Task { @MainActor in self.appendAttachments([attachment]) }
+            } catch {
+                Task { @MainActor in self.appState.showStatus(error.localizedDescription) }
+            }
+        }
+    }
+
+    private func importPastedImage(_ image: UIImage) {
+        do {
+            guard let data = image.pngData() else {
+                appState.showStatus("Could not read the image from the clipboard.")
+                return
+            }
+            let attachment = try MobileAttachmentStagingService.stageImageData(
+                data,
+                suggestedName: "pasted-\(UUID().uuidString).png",
+                contentType: .png
+            )
+            appendAttachments([attachment])
+        } catch {
+            appState.showStatus(error.localizedDescription)
+        }
+    }
+    #endif
 
     private func removeAttachment(_ attachment: ChatAttachment) {
         draftAttachments.removeAll { $0.id == attachment.id }
