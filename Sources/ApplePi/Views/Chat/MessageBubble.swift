@@ -1,4 +1,5 @@
 import AppKit
+import QuickLook
 import SwiftUI
 import ApplePiCore
 import ApplePiRemote
@@ -338,36 +339,26 @@ private struct MacUserAttachmentView: View {
     @EnvironmentObject private var appState: PiAppState
     let attachment: UserVisibleAttachment
     let isUserMessage: Bool
-    @State private var previewImage: NSImage?
+    @State private var previewURL: URL?
     @State private var isLoading = false
     @State private var errorText: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let previewImage {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 280, maxHeight: 280)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            } else {
-                HStack(spacing: 8) {
-                    Image(systemName: iconName).font(.system(size: 18, weight: .medium))
-                    Text(displayName).font(.subheadline).lineLimit(2)
-                    if isLoading { ProgressView().controlSize(.small) }
-                    Spacer(minLength: 0)
-                    if case .image = attachment.kind {
-                        Button("Preview") { Task { await loadImagePreviewIfNeeded() } }
-                            .buttonStyle(.borderless)
-                            .disabled(isLoading)
-                    }
-                    if attachment.attachmentID != nil {
-                        Button("Open") { openAttachment() }.buttonStyle(.borderless)
-                        Button("Save") { saveAttachment() }.buttonStyle(.borderless)
-                    }
+            HStack(spacing: 8) {
+                Image(systemName: iconName).font(.system(size: 18, weight: .medium))
+                Text(displayName)
+                    .font(.subheadline)
+                    .lineLimit(2)
+                    .onTapGesture(perform: previewAttachment)
+                if isLoading { ProgressView().controlSize(.small) }
+                Spacer(minLength: 0)
+                if attachment.attachmentID != nil {
+                    Button("Preview") { previewAttachment() }.buttonStyle(.borderless)
+                    Button("Save") { saveAttachment() }.buttonStyle(.borderless)
                 }
-                .frame(maxWidth: 320, alignment: .leading)
             }
+            .frame(maxWidth: 320, alignment: .leading)
             if let errorText {
                 Text(errorText).font(.caption).foregroundStyle(.red).lineLimit(2)
             }
@@ -375,6 +366,7 @@ private struct MacUserAttachmentView: View {
         .padding(10)
         .background(Color.black.opacity(isUserMessage ? 0.12 : 0.05))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .quickLookPreview($previewURL)
     }
 
     private var displayName: String {
@@ -390,24 +382,6 @@ private struct MacUserAttachmentView: View {
         }
     }
 
-    private func loadImagePreviewIfNeeded() async {
-        guard case .image(let path, _, let attachmentID, _) = attachment.kind else { return }
-        isLoading = true
-        defer { isLoading = false }
-        let data: Data?
-        if let attachmentID {
-            data = try? await RemoteDaemonClient().downloadAttachment(host: appState.host, id: attachmentID).data
-        } else if path.hasPrefix("data:"), let comma = path.firstIndex(of: ",") {
-            data = Data(base64Encoded: String(path[path.index(after: comma)...]))
-        } else if path.hasPrefix("/") {
-            data = try? Data(contentsOf: URL(fileURLWithPath: path))
-        } else {
-            data = nil
-        }
-        guard !Task.isCancelled else { return }
-        previewImage = data.flatMap { NSImage(data: $0) }
-    }
-
     private func fetch() async throws -> RemoteFileDownload {
         guard let attachmentID = attachment.attachmentID else {
             throw RemoteDaemonError.requestFailed(status: 404, body: "Attachment is not available remotely.")
@@ -415,15 +389,17 @@ private struct MacUserAttachmentView: View {
         return try await RemoteDaemonClient().downloadAttachment(host: appState.host, id: attachmentID)
     }
 
-    private func openAttachment() {
+    private func previewAttachment() {
         Task {
+            isLoading = true
+            defer { isLoading = false }
             do {
                 let file = try await fetch()
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-app-attachments", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let url = directory.appendingPathComponent("\(UUID().uuidString)-\(safeName(file.fileName))")
                 try file.data.write(to: url, options: .atomic)
-                NSWorkspace.shared.open(url)
+                previewURL = url
             } catch { errorText = error.localizedDescription }
         }
     }
@@ -454,6 +430,7 @@ struct MessageBubble: View {
     @EnvironmentObject private var appState: PiAppState
     let message: Message
     var fileReferenceBaseDirectory: String?
+    @State private var previewURL: URL?
 
     @ViewBuilder
     var body: some View {
@@ -472,6 +449,7 @@ struct MessageBubble: View {
                     copyMessageToPasteboard()
                 }
             }
+            .quickLookPreview($previewURL)
         }
     }
 
@@ -546,11 +524,15 @@ struct MessageBubble: View {
         case .image(let path, _):
             bubbleSurface(isLastVisibleBlock: isLastVisibleBlock, prefersCompactWidth: true) {
                 if let image = resolvedImage(for: path) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 240, maxHeight: 240)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Button { previewImage(at: path) } label: {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 240, maxHeight: 240)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Preview")
                 } else {
                     Text("[image]")
                         .font(.body.monospaced())
@@ -701,6 +683,24 @@ struct MessageBubble: View {
             }
             return NSImage(contentsOfFile: trimmed)
         }
+    }
+
+    private func previewImage(at path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let data: Data?
+        if trimmed.hasPrefix("data:"), let comma = trimmed.firstIndex(of: ",") {
+            data = Data(base64Encoded: String(trimmed[trimmed.index(after: comma)...]))
+        } else {
+            data = try? Data(contentsOf: URL(fileURLWithPath: trimmed))
+        }
+        guard let data else { return }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-app-image-previews", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("\(UUID().uuidString).png")
+            try data.write(to: url, options: .atomic)
+            previewURL = url
+        } catch {}
     }
 
     private func copyMessageToPasteboard() {

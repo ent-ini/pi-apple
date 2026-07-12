@@ -1,4 +1,5 @@
 import SwiftUI
+import QuickLook
 import PhotosUI
 import UniformTypeIdentifiers
 import ApplePiCore
@@ -1799,6 +1800,7 @@ private struct MobileAttachmentCard: View {
     @EnvironmentObject private var appState: MobilePiAppState
     let attachment: MobileTextAttachment
     @State private var localURL: URL?
+    @State private var previewURL: URL?
     @State private var isLoading = false
 
     var body: some View {
@@ -1807,8 +1809,13 @@ private struct MobileAttachmentCard: View {
                 MobileAttachmentImage(path: "pi-attachment://\(id)/\(attachment.fileName)", mimeType: attachment.mimeType)
             } else {
                 HStack(spacing: 8) {
-                    Image(systemName: attachment.mimeType?.lowercased().hasPrefix("audio/") == true ? "waveform" : "doc")
-                    Text(attachment.fileName).lineLimit(2)
+                    Button(action: preview) {
+                        HStack(spacing: 8) {
+                            Image(systemName: attachment.mimeType?.lowercased().hasPrefix("audio/") == true ? "waveform" : "doc")
+                            Text(attachment.fileName).lineLimit(2)
+                        }
+                    }
+                    .buttonStyle(.plain)
                     Spacer(minLength: 0)
                     if let localURL {
                         ShareLink(item: localURL) { Image(systemName: "square.and.arrow.up") }
@@ -1829,22 +1836,37 @@ private struct MobileAttachmentCard: View {
         .padding(10)
         .background(Color.black.opacity(0.10))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .quickLookPreview($previewURL)
+    }
+
+    private func preview() {
+        Task {
+            isLoading = true
+            defer { isLoading = false }
+            previewURL = try? await materialize()
+        }
     }
 
     private func download() {
-        guard let id = attachment.attachmentID else { return }
-        isLoading = true
         Task {
+            isLoading = true
             defer { isLoading = false }
-            guard let file = try? await RemoteDaemonClient().downloadAttachment(host: appState.host, id: id, tokenOverride: appState.daemonToken.nilIfBlank) else { return }
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ApplePiDownloads", isDirectory: true)
-            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("\(UUID().uuidString)-\(file.fileName)")
-            do {
-                try file.data.write(to: url, options: .atomic)
-                localURL = url
-            } catch {}
+            _ = try? await materialize()
         }
+    }
+
+    private func materialize() async throws -> URL {
+        if let localURL { return localURL }
+        guard let id = attachment.attachmentID else {
+            throw RemoteDaemonError.requestFailed(status: 404, body: "Attachment is not available remotely.")
+        }
+        let file = try await RemoteDaemonClient().downloadAttachment(host: appState.host, id: id, tokenOverride: appState.daemonToken.nilIfBlank)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ApplePiDownloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(UUID().uuidString)-\(file.fileName)")
+        try file.data.write(to: url, options: .atomic)
+        localURL = url
+        return url
     }
 }
 
@@ -1855,17 +1877,22 @@ private struct MobileAttachmentImage: View {
     let mimeType: String?
 
     @State private var image: UIImage?
+    @State private var previewData: Data?
+    @State private var previewURL: URL?
     @State private var didFail = false
     @State private var requestedRemoteLoad = false
 
     var body: some View {
         Group {
             if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 280, maxHeight: 340)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Button(action: showPreview) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 280, maxHeight: 340)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
             } else if didFail {
                 Label("Image attachment", systemImage: "photo")
                     .font(.subheadline)
@@ -1884,6 +1911,7 @@ private struct MobileAttachmentImage: View {
                     .frame(width: 72, height: 56)
             }
         }
+        .quickLookPreview($previewURL)
         .task(id: path) {
             didFail = false
             // A history page only contains metadata. Do not fetch MinIO image
@@ -1917,8 +1945,23 @@ private struct MobileAttachmentImage: View {
             data = nil
         }
         guard !Task.isCancelled else { return }
+        previewData = data
         image = data.flatMap(UIImage.init(data:))
         didFail = image == nil
+    }
+
+    private func showPreview() {
+        guard let previewData else { return }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ApplePiPreviews", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let extensionName = mimeType?.lowercased().contains("png") == true ? "png" : "jpg"
+            let url = directory.appendingPathComponent("\(UUID().uuidString).\(extensionName)")
+            try previewData.write(to: url, options: .atomic)
+            previewURL = url
+        } catch {
+            didFail = true
+        }
     }
 
     private static func attachmentID(from value: String) -> String? {

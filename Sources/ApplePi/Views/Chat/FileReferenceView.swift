@@ -1,4 +1,5 @@
 import AppKit
+import QuickLook
 import SwiftUI
 import ApplePiCore
 import ApplePiRemote
@@ -182,9 +183,8 @@ struct ChatFileReferenceCard: View {
     let reference: ChatFileReference
     let baseDirectory: String?
 
-    @State private var previewImage: NSImage?
+    @State private var previewURL: URL?
     @State private var status: String?
-    @State private var isLoadingPreview = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -194,16 +194,20 @@ struct ChatFileReferenceCard: View {
                     .foregroundStyle(appState.appearance.accentColor)
                     .frame(width: 28)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(reference.displayName)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(reference.path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                Button(action: preview) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(reference.displayName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Text(reference.path)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
+                .buttonStyle(.plain)
+                .help("Preview")
 
                 Spacer(minLength: 8)
 
@@ -211,17 +215,6 @@ struct ChatFileReferenceCard: View {
                     .buttonStyle(.borderless)
                 Button("Download") { download() }
                     .buttonStyle(.borderless)
-            }
-
-            if let previewImage {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 320, maxHeight: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            } else if isLoadingPreview {
-                ProgressView()
-                    .controlSize(.small)
             }
 
             if let status {
@@ -240,6 +233,7 @@ struct ChatFileReferenceCard: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
+        .quickLookPreview($previewURL)
     }
 
     private func preview() {
@@ -247,8 +241,8 @@ struct ChatFileReferenceCard: View {
             do {
                 let localURL = try await materializeFileForPreview()
                 await MainActor.run {
-                    NSWorkspace.shared.open(localURL)
-                    status = "Opened preview."
+                    previewURL = localURL
+                    status = nil
                 }
             } catch {
                 await MainActor.run { status = "Error: \(error.localizedDescription)" }
