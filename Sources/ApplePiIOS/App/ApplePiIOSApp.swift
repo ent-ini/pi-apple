@@ -51,6 +51,9 @@ final class MobilePiAppState: ObservableObject {
     @Published private(set) var isLoadingRuntime = false
     @Published private(set) var isLoadingAvailableModels = false
     @Published private(set) var defaultModelPreference: DefaultModelPreference?
+    /// One-off model override for the not-yet-created session currently open
+    /// in the composer. It must never be written to the global default.
+    @Published private(set) var pendingNewSessionModelPreference: DefaultModelPreference?
     @Published var draft = ""
     @Published var sessionSearchText = ""
 
@@ -185,6 +188,15 @@ final class MobilePiAppState: ObservableObject {
         return runtime(defaultRuntime, applying: defaultModelPreference)
     }
 
+    private var newSessionModelPreference: DefaultModelPreference? {
+        pendingNewSessionModelPreference ?? defaultModelPreference
+    }
+
+    var newSessionRuntimeForDisplay: SessionRuntimeState? {
+        guard let defaultRuntime else { return nil }
+        return runtime(defaultRuntime, applying: newSessionModelPreference)
+    }
+
     func isSessionSending(_ session: PiSessionSummary) -> Bool {
         sendingSessionIDs.contains(session.id)
     }
@@ -204,6 +216,13 @@ final class MobilePiAppState: ObservableObject {
             return thinking
         }
         return defaultRuntimeForDisplay?.thinkingLevel.nilIfBlank ?? "Use daemon default"
+    }
+
+    var newSessionModelDisplayName: String {
+        if let newSessionModelPreference {
+            return newSessionModelPreference.id
+        }
+        return defaultModelDisplayName
     }
 
     var defaultContextWindowDisplayName: String {
@@ -378,8 +397,9 @@ final class MobilePiAppState: ObservableObject {
 
     func startNewSession() {
         selectedPendingNewSessionSendID = nil
+        pendingNewSessionModelPreference = nil
         selectedSession = nil
-        selectedRuntime = defaultRuntimeForDisplay
+        selectedRuntime = newSessionRuntimeForDisplay
         availableModels = cachedSelectableAvailableModels
         resetSelectedTranscript()
         stopSelectedSessionStream()
@@ -461,10 +481,10 @@ final class MobilePiAppState: ObservableObject {
             return
         }
         guard let sessionID = selectedSession?.id.nilIfBlank else {
-            selectedRuntime = defaultRuntimeForDisplay
+            selectedRuntime = newSessionRuntimeForDisplay
             availableModels = cachedSelectableAvailableModels
             await refreshSessionDefaultsCache(quietly: true)
-            selectedRuntime = defaultRuntimeForDisplay
+            selectedRuntime = newSessionRuntimeForDisplay
             availableModels = cachedSelectableAvailableModels
             return
         }
@@ -583,7 +603,7 @@ final class MobilePiAppState: ObservableObject {
                         self.availableModels = Self.selectableModels(from: models)
                     } else {
                         self.availableModels = self.cachedSelectableAvailableModels
-                        self.selectedRuntime = self.defaultRuntimeForDisplay
+                        self.selectedRuntime = self.newSessionRuntimeForDisplay
                     }
                 }
             } catch {
@@ -624,7 +644,7 @@ final class MobilePiAppState: ObservableObject {
             guard host == requestHost else { return }
             cacheSessionDefaults(snapshot)
             if selectedSession == nil {
-                selectedRuntime = defaultRuntimeForDisplay
+                selectedRuntime = newSessionRuntimeForDisplay
                 availableModels = cachedSelectableAvailableModels
             }
         } catch {
@@ -647,6 +667,21 @@ final class MobilePiAppState: ObservableObject {
         ))
     }
 
+    func setNewSessionModel(_ model: PiModelOption?) {
+        guard selectedSession == nil else { return }
+        guard let model else {
+            pendingNewSessionModelPreference = nil
+            selectedRuntime = newSessionRuntimeForDisplay
+            return
+        }
+        pendingNewSessionModelPreference = DefaultModelPreference(
+            provider: model.provider,
+            modelID: model.modelID,
+            thinkingLevel: pendingNewSessionModelPreference?.thinkingLevel ?? defaultModelPreference?.thinkingLevel
+        )
+        selectedRuntime = newSessionRuntimeForDisplay
+    }
+
     func setDefaultThinkingLevel(_ level: String?) {
         guard var preference = defaultModelPreference else { return }
         preference.thinkingLevel = level?.nilIfBlank
@@ -657,7 +692,7 @@ final class MobilePiAppState: ObservableObject {
         defaultModelPreference = preference
         saveModelDefaults()
         if selectedSession == nil {
-            selectedRuntime = defaultRuntimeForDisplay
+            selectedRuntime = newSessionRuntimeForDisplay
             availableModels = cachedSelectableAvailableModels
         }
     }

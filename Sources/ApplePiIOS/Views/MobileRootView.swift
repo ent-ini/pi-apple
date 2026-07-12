@@ -1582,11 +1582,21 @@ private struct MessageBubble: View {
     @ViewBuilder
     private func blockView(_ block: ContentBlock, isLastVisibleBlock: Bool) -> some View {
         switch block {
-        case .text(let text):
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
+        case .text(let rawText):
+            let presentation = MobileTextAttachmentPresentation.build(
+                from: rawText,
+                hasSeparateImageBlock: message.content.contains { if case .image = $0 { return true }; return false }
+            )
+            if !presentation.text.isEmpty || !presentation.attachments.isEmpty {
                 bubbleSurface(isLastVisibleBlock: isLastVisibleBlock) {
-                    MobileMarkdownText(trimmed)
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(presentation.attachments) { attachment in
+                            MobileAttachmentCard(attachment: attachment)
+                        }
+                        if !presentation.text.isEmpty {
+                            MobileMarkdownText(presentation.text)
+                        }
+                    }
                 }
             }
         case .thinking:
@@ -1656,8 +1666,11 @@ private struct MessageBubble: View {
             case .thinking:
                 return nil
             case .text(let rawText):
-                let visible = MobileMessageTextSanitizer.visibleText(from: rawText)
-                return visible.isEmpty ? nil : .text(visible)
+                let presentation = MobileTextAttachmentPresentation.build(
+                    from: rawText,
+                    hasSeparateImageBlock: message.content.contains { if case .image = $0 { return true }; return false }
+                )
+                return presentation.text.isEmpty && presentation.attachments.isEmpty ? nil : block
             case .image:
                 return block
             }
@@ -1696,6 +1709,111 @@ private struct MessageBubble: View {
         formatter.dateFormat = "HH:mm"
         return formatter
     }()
+}
+
+private struct MobileTextAttachment: Identifiable, Hashable {
+    let id: String
+    let fileName: String
+    let mimeType: String?
+    let attachmentID: String?
+    let isImage: Bool
+}
+
+private struct MobileTextAttachmentPresentation {
+    let text: String
+    let attachments: [MobileTextAttachment]
+
+    static func build(from rawText: String, hasSeparateImageBlock: Bool) -> MobileTextAttachmentPresentation {
+        let pattern = #"<file\s+name=\"([^\"]+)\"([^>]*)>([\s\S]*?)</file>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return .init(text: MobileMessageTextSanitizer.visibleText(from: rawText), attachments: [])
+        }
+        let range = NSRange(rawText.startIndex..., in: rawText)
+        let matches = regex.matches(in: rawText, range: range)
+        guard !matches.isEmpty else {
+            return .init(text: MobileMessageTextSanitizer.visibleText(from: rawText), attachments: [])
+        }
+        var attachments: [MobileTextAttachment] = []
+        for match in matches {
+            guard let pathRange = Range(match.range(at: 1), in: rawText),
+                  let attributesRange = Range(match.range(at: 2), in: rawText) else { continue }
+            let path = String(rawText[pathRange])
+            let attributes = String(rawText[attributesRange])
+            let attachmentID = attribute("attachment-id", in: attributes)
+            let fileName = attribute("attachment-name", in: attributes)
+                ?? URL(fileURLWithPath: path).lastPathComponent.nilIfBlank
+                ?? "Attachment"
+            let mime = attribute("attachment-mime", in: attributes)
+            let isImage = (mime?.lowercased().hasPrefix("image/") == true)
+                || ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"].contains(URL(fileURLWithPath: path).pathExtension.lowercased())
+            if !(isImage && hasSeparateImageBlock) {
+                attachments.append(.init(id: attachmentID ?? path, fileName: fileName, mimeType: mime, attachmentID: attachmentID, isImage: isImage))
+            }
+        }
+        let stripped = regex.stringByReplacingMatches(in: rawText, range: range, withTemplate: "")
+        return .init(text: MobileMessageTextSanitizer.visibleText(from: stripped), attachments: attachments)
+    }
+
+    private static func attribute(_ name: String, in value: String) -> String? {
+        let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: name) + #"=\"([^\"]+)\""#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range(at: 1), in: value) else { return nil }
+        return String(value[range])
+    }
+}
+
+private struct MobileAttachmentCard: View {
+    @EnvironmentObject private var appState: MobilePiAppState
+    let attachment: MobileTextAttachment
+    @State private var localURL: URL?
+    @State private var isLoading = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if attachment.isImage, let id = attachment.attachmentID {
+                MobileAttachmentImage(path: "pi-attachment://\(id)/\(attachment.fileName)", mimeType: attachment.mimeType)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: attachment.mimeType?.lowercased().hasPrefix("audio/") == true ? "waveform" : "doc")
+                    Text(attachment.fileName).lineLimit(2)
+                    Spacer(minLength: 0)
+                    if let localURL {
+                        ShareLink(item: localURL) { Image(systemName: "square.and.arrow.up") }
+                    } else if attachment.attachmentID != nil {
+                        Button { download() } label: {
+                            if isLoading {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "arrow.down.circle")
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isLoading)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func download() {
+        guard let id = attachment.attachmentID else { return }
+        isLoading = true
+        Task {
+            defer { isLoading = false }
+            guard let file = try? await RemoteDaemonClient().downloadAttachment(host: appState.host, id: id, tokenOverride: appState.daemonToken.nilIfBlank) else { return }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ApplePiDownloads", isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("\(UUID().uuidString)-\(file.fileName)")
+            do {
+                try file.data.write(to: url, options: .atomic)
+                localURL = url
+            } catch {}
+        }
+    }
 }
 
 private struct MobileAttachmentImage: View {
@@ -1749,8 +1867,9 @@ private struct MobileAttachmentImage: View {
     }
 
     private static func attachmentID(from value: String) -> String? {
-        guard let url = URL(string: value), url.scheme == "pi-attachment" else { return nil }
-        return url.host?.nilIfBlank
+        let prefix = "pi-attachment://"
+        guard value.hasPrefix(prefix) else { return nil }
+        return String(value.dropFirst(prefix.count).prefix { $0 != "/" }).nilIfBlank
     }
     }
 }
