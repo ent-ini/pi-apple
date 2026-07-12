@@ -310,6 +310,7 @@ private struct MobileSessionDetailView: View {
     @State private var showsModelPicker = false
     @State private var showsThinkingPicker = false
     @State private var showsDefaultModelPicker = false
+    @State private var showsNewSessionModelPicker = false
     @State private var showsDefaultThinkingPicker = false
     @State private var showsSubagents = false
     @State private var showsRenameAlert = false
@@ -405,6 +406,12 @@ private struct MobileSessionDetailView: View {
             }
             .environmentObject(appState)
         }
+        .sheet(isPresented: $showsNewSessionModelPicker) {
+            NavigationStack {
+                MobileNewSessionModelPickerSheet()
+            }
+            .environmentObject(appState)
+        }
         .sheet(isPresented: $showsDefaultThinkingPicker) {
             NavigationStack {
                 MobileDefaultThinkingPickerSheet()
@@ -435,12 +442,14 @@ private struct MobileSessionDetailView: View {
             guard let item else { return }
             Task { await importPhoto(item) }
         }
+        #if canImport(UIKit)
         .sheet(isPresented: $showsCamera) {
             MobileCameraPicker { image in
                 importCameraImage(image)
             }
             .ignoresSafeArea()
         }
+        #endif
         .mobileBackSwipe { dismiss() }
         .onAppear {
             appState.setChatVisible(true)
@@ -492,8 +501,8 @@ private struct MobileSessionDetailView: View {
                 Button("Context: \(appState.defaultContextWindowDisplayName)") {}
                     .disabled(true)
 
-                Button("Model: \(appState.defaultModelDisplayName)") {
-                    showsDefaultModelPicker = true
+                Button("Model: \(appState.newSessionModelDisplayName) · this chat") {
+                    showsNewSessionModelPicker = true
                     appState.refreshAvailableModelsCache()
                 }
 
@@ -1207,6 +1216,7 @@ private struct MobileSessionDetailView: View {
         }
     }
 
+    #if canImport(UIKit)
     private func importCameraImage(_ image: UIImage?) {
         guard let image else { return }
         do {
@@ -1224,6 +1234,7 @@ private struct MobileSessionDetailView: View {
             appState.showStatus(error.localizedDescription)
         }
     }
+    #endif
 
     private func addAttachments(from urls: [URL]) {
         guard !urls.isEmpty else { return }
@@ -1324,6 +1335,7 @@ private enum MobileAttachmentStagingService {
     }
 }
 
+#if canImport(UIKit)
 private struct MobileCameraPicker: UIViewControllerRepresentable {
     static var isAvailable: Bool { UIImagePickerController.isSourceTypeAvailable(.camera) }
 
@@ -1356,6 +1368,12 @@ private struct MobileCameraPicker: UIViewControllerRepresentable {
         }
     }
 }
+
+#else
+private enum MobileCameraPicker {
+    static let isAvailable = false
+}
+#endif
 
 private struct MobileComposerAttachmentPreview: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -1816,6 +1834,7 @@ private struct MobileAttachmentCard: View {
     }
 }
 
+#if canImport(UIKit)
 private struct MobileAttachmentImage: View {
     @EnvironmentObject private var appState: MobilePiAppState
     let path: String
@@ -1871,8 +1890,16 @@ private struct MobileAttachmentImage: View {
         guard value.hasPrefix(prefix) else { return nil }
         return String(value.dropFirst(prefix.count).prefix { $0 != "/" }).nilIfBlank
     }
+}
+#else
+private struct MobileAttachmentImage: View {
+    let path: String
+    let mimeType: String?
+    var body: some View {
+        Label("Image attachment", systemImage: "photo")
     }
 }
+#endif
 
 private enum MobileMessageTextSanitizer {
     static func visibleText(from text: String) -> String {
@@ -2605,6 +2632,39 @@ private struct MobileModelPickerSheet: View {
     }
 }
 
+private struct MobileNewSessionModelPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: MobilePiAppState
+
+    var body: some View {
+        MobileModelList(
+            models: appState.cachedSelectableAvailableModels,
+            selectedID: appState.pendingNewSessionModelPreference?.id ?? appState.defaultModelPreference?.id,
+            emptyMessage: appState.isLoadingAvailableModels ? "Loading models…" : "No cached models yet. Refresh once to populate the picker.",
+            includesDaemonDefault: true,
+            defaultSelectionTitle: "Use app default",
+            onSelectDefault: {
+                appState.setNewSessionModel(nil)
+                dismiss()
+            },
+            onSelectModel: { model in
+                appState.setNewSessionModel(model)
+                dismiss()
+            }
+        )
+        .navigationTitle("Model for this chat")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .onAppear { appState.refreshAvailableModelsCache() }
+    }
+}
+
 private struct MobileDefaultModelPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: MobilePiAppState
@@ -2687,6 +2747,7 @@ private struct MobileModelList: View {
     let selectedID: String?
     let emptyMessage: String
     let includesDaemonDefault: Bool
+    let defaultSelectionTitle: String = "Use daemon default"
     let onSelectDefault: (() -> Void)?
     let onSelectModel: (PiModelOption) -> Void
 
@@ -2695,7 +2756,7 @@ private struct MobileModelList: View {
             LazyVStack(alignment: .leading, spacing: 10) {
                 if includesDaemonDefault, let onSelectDefault {
                     MobileSelectionRow(
-                        title: "Use daemon default",
+                        title: defaultSelectionTitle,
                         subtitle: nil,
                         isSelected: selectedID == nil,
                         action: onSelectDefault
