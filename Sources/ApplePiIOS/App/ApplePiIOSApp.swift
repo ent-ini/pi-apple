@@ -733,7 +733,6 @@ final class MobilePiAppState: ObservableObject {
             selectedRuntime = defaultRuntimeForDisplay
             resetSelectedTranscript()
         }
-        appendOptimisticUserMessage(taggedPrompt, attachments: attachments)
         defer {
             if !operationFinished {
                 finishSendOperation(operationID)
@@ -743,6 +742,7 @@ final class MobilePiAppState: ObservableObject {
         let host = host
         do {
             let uploadedAttachments = try await uploadAttachmentsIfNeeded(attachments)
+            appendOptimisticUserMessage(taggedPrompt, attachments: uploadedAttachments)
             if let sessionID = initialSessionID {
                 try await RemoteDaemonClient().streamSend(host: host, sessionID: sessionID, prompt: taggedPrompt, attachments: uploadedAttachments, keepRunningOnDisconnect: true) { event in
                     await self.handleTurnStreamEvent(event, context: context)
@@ -1189,7 +1189,7 @@ final class MobilePiAppState: ObservableObject {
         sortSelectedEventsForDisplay()
     }
 
-    private func appendOptimisticUserMessage(_ prompt: String, attachments: [ChatAttachment]) {
+    private func appendOptimisticUserMessage(_ prompt: String, attachments: [UploadedAttachmentReference]) {
         var content = attachments.map { Self.optimisticContentBlock(for: $0) }
         content.append(.text(prompt))
         let message = Message(
@@ -1271,15 +1271,19 @@ final class MobilePiAppState: ObservableObject {
         return uploaded
     }
 
-    private static func optimisticContentBlock(for attachment: ChatAttachment) -> ContentBlock {
-        switch attachment.kind {
-        case .image:
-            return .image(path: attachment.filePath, mime: attachment.mimeType)
-        case .file:
-            return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Binary file attached: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
-        case .audio:
-            return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Audio attachment: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
+    private static func optimisticContentBlock(for attachment: UploadedAttachmentReference) -> ContentBlock {
+        let name = attachment.fileName.xmlEscapedForPrompt
+        let mime = attachment.mimeType ?? "application/octet-stream"
+        if let id = attachment.id?.nilIfBlank {
+            let reference = "pi-attachment://\(id)/\(name)"
+            if mime.lowercased().hasPrefix("image/") {
+                return .image(path: reference, mime: mime)
+            }
+            let label = mime.lowercased().hasPrefix("audio/") ? "Audio attachment" : "File attached"
+            return .text("<file name=\"\(reference)\" attachment-id=\"\(id)\" attachment-name=\"\(name)\" attachment-mime=\"\(mime.xmlEscapedForPrompt)\">[\(label): \(name)]</file>")
         }
+        // Legacy daemon fallback. New uploads always have an opaque ID.
+        return .text("[File attached: \(name)]")
     }
 
     private func upsertSelectedEvent(_ event: SessionEvent, allowPersistedToWin: Bool) {

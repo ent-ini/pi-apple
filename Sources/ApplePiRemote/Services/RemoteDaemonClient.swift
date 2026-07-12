@@ -713,6 +713,9 @@ public struct RemoteDaemonClient: Sendable {
             accept: "application/json"
         )
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        // V2 clients exchange opaque attachment IDs only. Older builds omit
+        // this header and still receive the legacy daemon cache path.
+        request.setValue("2", forHTTPHeaderField: "X-Pi-Attachment-Protocol")
 
         // The filename is embedded directly in a
         // `Content-Disposition: form-data; name="file"; filename="…"`
@@ -1654,7 +1657,7 @@ public struct UploadedAttachmentReference: Codable, Hashable, Sendable {
     /// Opaque daemon attachment ID. New requests encode this instead of a path.
     public let id: String?
     /// Kept for decoding responses from older daemons only.
-    public let path: String
+    public let path: String?
     public let fileName: String
     public let mimeType: String?
     public let size: Int64?
@@ -1663,7 +1666,7 @@ public struct UploadedAttachmentReference: Codable, Hashable, Sendable {
 
     public init(
         id: String? = nil,
-        path: String = "",
+        path: String? = nil,
         fileName: String,
         mimeType: String?,
         size: Int64?,
@@ -1686,7 +1689,7 @@ public struct UploadedAttachmentReference: Codable, Hashable, Sendable {
         if let id, !id.isEmpty {
             try container.encode(id, forKey: .id)
         } else {
-            try container.encode(path, forKey: .path)
+            try container.encodeIfPresent(path, forKey: .path)
         }
         try container.encode(fileName, forKey: .fileName)
         try container.encodeIfPresent(mimeType, forKey: .mimeType)

@@ -1739,9 +1739,13 @@ func (s *server) handleUploads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, storeErr.Error())
 		return
 	}
+	legacyPath := ""
+	if strings.TrimSpace(r.Header.Get("X-Pi-Attachment-Protocol")) != "2" {
+		legacyPath = record.LocalPath
+	}
 	writeJSON(w, http.StatusOK, uploadResponse{
 		ID:        record.ID,
-		Path:      record.LocalPath,
+		Path:      legacyPath,
 		FileName:  record.FileName,
 		MimeType:  record.MimeType,
 		Size:      record.Size,
@@ -1974,14 +1978,16 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 			})
 			prefix.WriteString("<file name=\"")
 			prefix.WriteString(xmlEscape(attachment.Path))
-			prefix.WriteString("\"></file>\n")
+			writeAttachmentPromptAttributes(&prefix, attachment)
+			prefix.WriteString("></file>\n")
 			continue
 		}
 
 		if len(data) <= 200000 && utf8.Valid(data) && !bytes.Contains(data, []byte{0}) {
 			prefix.WriteString("<file name=\"")
 			prefix.WriteString(xmlEscape(attachment.Path))
-			prefix.WriteString("\">\n")
+			writeAttachmentPromptAttributes(&prefix, attachment)
+			prefix.WriteString(">\n")
 			prefix.Write(data)
 			prefix.WriteString("\n</file>\n")
 			continue
@@ -1993,7 +1999,8 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 		}
 		prefix.WriteString("<file name=\"")
 		prefix.WriteString(xmlEscape(attachment.Path))
-		prefix.WriteString("\">")
+		writeAttachmentPromptAttributes(&prefix, attachment)
+		prefix.WriteString(">")
 		prefix.WriteString(xmlEscape(fallback))
 		prefix.WriteString("</file>\n")
 	}
@@ -2008,6 +2015,19 @@ func (s *server) buildRPCPromptPayload(prompt string, attachments []attachmentRe
 		Message: message,
 		Images:  images,
 	}, nil
+}
+
+func writeAttachmentPromptAttributes(prefix *strings.Builder, attachment attachmentReference) {
+	if !attachmentIDPattern.MatchString(attachment.ID) {
+		return
+	}
+	prefix.WriteString(" attachment-id=\"")
+	prefix.WriteString(xmlEscape(attachment.ID))
+	prefix.WriteString("\" attachment-name=\"")
+	prefix.WriteString(xmlEscape(firstNonBlank(attachment.FileName, "attachment")))
+	prefix.WriteString("\" attachment-mime=\"")
+	prefix.WriteString(xmlEscape(firstNonBlank(attachment.MimeType, "application/octet-stream")))
+	prefix.WriteString("\"")
 }
 
 // prepareVisionImage converts HEIC/HEIF only for providers' vision payload.

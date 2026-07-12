@@ -114,7 +114,7 @@ private struct UserMessagePresentation {
     }
 
     private static func extractAttachmentsAndText(from rawText: String, includeImageTags: Bool) -> Extraction {
-        let pattern = #"<file\s+name=\"([^\"]+)\">([\s\S]*?)</file>"#
+        let pattern = #"<file\s+name=\"([^\"]+)\"[^>]*>([\s\S]*?)</file>"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return Extraction(attachments: [], text: sanitizeTextOnly(rawText))
         }

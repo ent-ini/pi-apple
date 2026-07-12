@@ -1699,6 +1699,7 @@ private struct MessageBubble: View {
 }
 
 private struct MobileAttachmentImage: View {
+    @EnvironmentObject private var appState: MobilePiAppState
     let path: String
     let mimeType: String?
 
@@ -1731,16 +1732,26 @@ private struct MobileAttachmentImage: View {
         let data: Data?
         if path.hasPrefix("data:"), let comma = path.firstIndex(of: ",") {
             data = Data(base64Encoded: String(path[path.index(after: comma)...]))
-        } else if path.hasPrefix("/") {
-            // This is the staged file while a send is in flight. Persisted
-            // messages instead carry the base64 image block from the daemon.
-            data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        } else if let id = Self.attachmentID(from: path) {
+            data = try? await RemoteDaemonClient().downloadAttachment(
+                host: appState.host,
+                id: id,
+                tokenOverride: appState.daemonToken.nilIfBlank
+            ).data
         } else {
+            // Old persisted sessions can still contain a daemon cache path;
+            // never expose it or try to use it from an iPhone.
             data = nil
         }
         guard !Task.isCancelled else { return }
         image = data.flatMap(UIImage.init(data:))
         didFail = image == nil
+    }
+
+    private static func attachmentID(from value: String) -> String? {
+        guard let url = URL(string: value), url.scheme == "pi-attachment" else { return nil }
+        return url.host?.nilIfBlank
+    }
     }
 }
 
@@ -1757,7 +1768,7 @@ private enum MobileMessageTextSanitizer {
             options: .regularExpression
         )
         let withoutFileTags = withoutTelegramTopic.replacingOccurrences(
-            of: #"<file\s+name=\"[^\"]*\">\[([^\]]+)\]</file>"#,
+            of: #"<file\s+name=\"[^\"]*\"[^>]*>\[([^\]]+)\]</file>"#,
             with: "$1",
             options: .regularExpression
         )
