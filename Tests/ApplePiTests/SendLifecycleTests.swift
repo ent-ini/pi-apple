@@ -298,6 +298,46 @@ private actor IntBox {
 }
 
 @MainActor
+@Test func chatSessionReconcilesAssistantFileReferenceAcrossLiveAndPersistedForms() {
+    let session = ChatSession(key: "test", title: "Test")
+    session.beginSending(prompt: "send the file")
+    session.applyStreamingEvents([
+        .message(
+            Message(
+                id: "live-assistant",
+                role: .assistant,
+                content: [.text("Here is the file: @/home/agent/ai-agent/workspace/output/result.pdf")],
+                model: nil,
+                timestamp: nil,
+                parentId: nil
+            ),
+            lineIndex: 0
+        )
+    ], isFinal: false)
+
+    session.appendPersistedEvents([
+        .message(
+            Message(
+                id: "persisted-assistant",
+                role: .assistant,
+                content: [.text("Here is the file: <file name=\"pi-attachment://att_0123456789abcdef0123456789abcdef/result.pdf\" attachment-id=\"att_0123456789abcdef0123456789abcdef\" attachment-name=\"result.pdf\" attachment-mime=\"application/pdf\">[File attached: result.pdf]</file>")],
+                model: nil,
+                timestamp: nil,
+                parentId: nil
+            ),
+            lineIndex: 1
+        )
+    ])
+
+    let assistantMessages = session.events.compactMap { event -> Message? in
+        guard case .message(let message, _) = event,
+              message.role == .assistant else { return nil }
+        return message
+    }
+    #expect(assistantMessages.map(\.id) == ["persisted-assistant"])
+}
+
+@MainActor
 @Test func chatSessionDoesNotExposeSyntheticAssistantPlaceholderBeforeStreamEventsArrive() {
     let session = ChatSession(key: "test", title: "Test")
     session.beginSending(prompt: "hello")

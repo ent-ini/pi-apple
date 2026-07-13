@@ -1218,8 +1218,49 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private func normalizedMessageText(_ text: String) -> String {
-        normalizeFileSentinelSpacing(in: normalizedFileBlocks(in: text))
+        normalizeFileSentinelSpacing(in: normalizedFileBlocks(in: normalizedFileReferenceForms(in: text)))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedFileReferenceForms(in text: String) -> String {
+        var result = text
+        let filePattern = #"<file\b([^>]*)>([\s\S]*?)</file>"#
+        if let regex = try? NSRegularExpression(pattern: filePattern) {
+            let nsText = result as NSString
+            let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsText.length))
+            for match in matches.reversed() {
+                guard let range = Range(match.range, in: result) else { continue }
+                let body = match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound
+                    ? nsText.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    : ""
+                // Empty tags are the persisted marker for image blocks; the
+                // image count is compared separately in messageSignature.
+                // Non-empty tags represent generic/audio files. Their local
+                // path, daemon cache path, and opaque MinIO URI are all one
+                // attachment and must collapse to the same sentinel.
+                result.replaceSubrange(range, with: body.isEmpty ? "" : "[file]")
+            }
+        }
+
+        // Live assistant events can still contain the documented @/path form
+        // while the persisted replay has already been decorated as a MinIO
+        // <file> tag. Treat both transport forms as the same file reference.
+        let pathPattern = #"(?<!\w)@((?:/|~/)[^\s<>()\[\]{}"']+)"#
+        if let regex = try? NSRegularExpression(pattern: pathPattern) {
+            let nsText = result as NSString
+            let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsText.length))
+            for match in matches.reversed() {
+                guard match.numberOfRanges > 1,
+                      let fullRange = Range(match.range, in: result),
+                      match.range(at: 1).location != NSNotFound else { continue }
+                let rawPath = nsText.substring(with: match.range(at: 1))
+                let path = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?»”’`*_~"))
+                guard !path.isEmpty else { continue }
+                let suffix = String(rawPath.dropFirst(path.count))
+                result.replaceSubrange(fullRange, with: "[file]\(suffix)")
+            }
+        }
+        return result
     }
 
     private func normalizedFileBlocks(in text: String) -> String {
