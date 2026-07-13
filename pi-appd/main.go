@@ -3646,7 +3646,22 @@ func parseSessionLines(lines []string) parsedSession {
 			result.DisplayName = stringValue(object, "name", "displayName", "title")
 		}
 		if typeValue == "message" {
-			result.MessageCount++
+			// Pi stores tool results and bash executions inside a
+			// `message`-shaped envelope with role "toolResult" or
+			// "bashExecution". Only real user/assistant turns should
+			// count toward the message total; everything else is
+			// bookkeeping that the user does not perceive as a
+			// conversation step. Assistant messages that consist only of
+			// `thinking` blocks (no text/image) are intermediate reasoning
+			// steps between tool calls and do not appear as their own
+			// bubble in the chat UI, so they must not inflate the counter
+			// either.
+			role := messageRole(object)
+			if role == "user" || role == "assistant" {
+				if messageHasUserVisibleContent(object) {
+					result.MessageCount++
+				}
+			}
 			if parentID, _ := object["parentId"].(string); parentID != "" {
 				childCounts[parentID]++
 			}
@@ -3654,19 +3669,15 @@ func parseSessionLines(lines []string) parsedSession {
 				if model := modelDescription(message); model != "" {
 					result.LatestModel = model
 				}
-				if result.FirstUserMessage == "" {
-					if role, _ := message["role"].(string); role == "user" {
-						result.FirstUserMessage = contentPreview(message["content"])
-					}
+				if result.FirstUserMessage == "" && role == "user" {
+					result.FirstUserMessage = contentPreview(message["content"])
 				}
 			} else {
 				if model := modelDescription(object); model != "" {
 					result.LatestModel = model
 				}
-				if result.FirstUserMessage == "" {
-					if role, _ := object["role"].(string); role == "user" {
-						result.FirstUserMessage = contentPreview(object["content"])
-					}
+				if result.FirstUserMessage == "" && role == "user" {
+					result.FirstUserMessage = contentPreview(object["content"])
 				}
 			}
 		}
@@ -4003,6 +4014,61 @@ func stringValue(object map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// messageRole returns the role of a `type: "message"` event. Pi stores real
+// turns inside a `message` envelope (`{message: {role, content, ...}}`) and
+// tool/bash results in the same envelope with `role: "toolResult"` /
+// `role: "bashExecution"`. Some legacy or test fixtures flatten the shape, so
+// also check the top-level `role`. Returns an empty string for anything else
+// (compaction, system, etc).
+func messageRole(object map[string]any) string {
+	if inner, ok := object["message"].(map[string]any); ok {
+		if role, _ := inner["role"].(string); role != "" {
+			return role
+		}
+	}
+	if role, _ := object["role"].(string); role != "" {
+		return role
+	}
+	return ""
+}
+
+// messageContentBlocks returns the content array of a `type: "message"` event
+// in a role-agnostic way: it prefers the wrapped shape but falls back to the
+// top-level `content` for flat fixtures.
+func messageContentBlocks(object map[string]any) []any {
+	if inner, ok := object["message"].(map[string]any); ok {
+		if blocks, ok := inner["content"].([]any); ok {
+			return blocks
+		}
+	}
+	if blocks, ok := object["content"].([]any); ok {
+		return blocks
+	}
+	return nil
+}
+
+// messageHasUserVisibleContent reports whether the `type: "message"` event
+// carries anything the user actually sees in the chat transcript. Text blocks
+// with non-whitespace content and image blocks count; thinking-only assistant
+// events (which Pi emits between tool calls) do not.
+func messageHasUserVisibleContent(object map[string]any) bool {
+	for _, raw := range messageContentBlocks(object) {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch blockType, _ := block["type"].(string); blockType {
+		case "text":
+			if text, _ := block["text"].(string); strings.TrimSpace(text) != "" {
+				return true
+			}
+		case "image":
+			return true
+		}
+	}
+	return false
 }
 
 func intValue(object map[string]any, keys ...string) int {

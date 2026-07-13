@@ -54,6 +54,33 @@ func TestParseSessionFileUsesLatestSessionInfoFromTail(t *testing.T) {
 	}
 }
 
+func TestParseSessionLinesOnlyCountsUserAssistantMessages(t *testing.T) {
+	lines := []string{
+		`{"type":"session","sessionId":"s1"}`,
+		`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`,
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"planning..."}]}}`,
+		`{"type":"message","message":{"role":"assistant","content":[]}}`,
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"   "}]}}`,
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"final"},{"type":"thinking","thinking":"..."}]}}`,
+		`{"type":"message","message":{"role":"toolResult","toolCallId":"c1","toolName":"ls","content":[]}}`,
+		`{"type":"message","message":{"role":"bashExecution","toolCallId":"c2","content":[]}}`,
+		`{"type":"message","message":{"role":"system","content":[]}}`,
+		`{"type":"message","role":"user","content":[{"type":"text","text":"flat"}]}`,
+		`{"type":"message","role":"assistant","content":[]}`,
+		`{"type":"message","role":"toolResult","content":[]}`,
+	}
+	parsed := parseSessionLines(lines)
+	// Counted: user with text, assistant with text, assistant with text+thinking,
+	// flat user with text = 4
+	// Excluded: thinking-only assistant, empty assistant, whitespace-only
+	// assistant, toolResult, bashExecution, system, flat empty assistant,
+	// flat toolResult.
+	if want := 4; parsed.MessageCount != want {
+		t.Fatalf("MessageCount = %d, want %d (user+assistant with visible text/image)", parsed.MessageCount, want)
+	}
+}
+
 func TestProjectsEqualIncludesLastActivity(t *testing.T) {
 	first := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
 	second := first.Add(time.Second)

@@ -975,13 +975,20 @@ final class MobilePiAppState: ObservableObject {
 
     private func bindSelectedSession(_ binding: PiSessionBinding) {
         guard let id = binding.sessionID?.nilIfBlank ?? binding.sessionPath?.nilIfBlank else { return }
+        // Optimistic messageCount: only counts user/assistant turns (excludes
+        // tool calls/results and bookkeeping events). The authoritative value
+        // arrives with the next `sessionUpdated` event from the daemon, which
+        // can re-split a single assistant turn with tool calls into several
+        // `.message` fragments locally, so the optimistic figure may briefly
+        // drift before the daemon catches up. The sidebar will snap to the
+        // daemon's count on the next catalog push.
         let summary = PiSessionSummary(
             id: id,
             filePath: binding.sessionPath ?? id,
             projectID: binding.workingDirectory ?? "remote",
             title: binding.title,
             workingDirectory: binding.workingDirectory,
-            messageCount: max(selectedEvents.filter(\.isVisibleInTranscript).count, 0),
+            messageCount: max(selectedEvents.filter(\.isCountableUserOrAssistantMessage).count, 0),
             modifiedAt: Date(),
             displayName: binding.title,
             parentSession: nil,

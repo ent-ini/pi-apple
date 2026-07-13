@@ -158,6 +158,29 @@ public enum SessionEvent: Identifiable, Hashable, Sendable {
         }
     }
 
+    /// Whether this event should count as a real conversation turn for the
+    /// session-level message counter. Pi stores tool results and bash
+    /// executions in a `message`-shaped envelope with role `toolResult` or
+    /// `bashExecution`; those must not inflate the visible count. Assistant
+    /// turns that consist only of `thinking` blocks (no text/image) are
+    /// intermediate reasoning between tool calls and are rendered as a
+    /// single bubble in the chat, so they must not inflate the counter
+    /// either.
+    public var isCountableUserOrAssistantMessage: Bool {
+        guard case .message(let message, _) = self else { return false }
+        guard message.role == .user || message.role == .assistant else { return false }
+        return message.content.contains { block in
+            switch block {
+            case .text(let text):
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .image:
+                return true
+            case .thinking:
+                return false
+            }
+        }
+    }
+
     private static let hiddenTranscriptEventTypes: Set<String> = [
         "model_change",
         "thinking_level_change",
