@@ -1446,7 +1446,8 @@ final class MobilePiAppState: ObservableObject {
         for block in message.content {
             switch block {
             case .text(let text):
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmed = normalizedFileReferenceForms(in: text)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { parts.append(trimmed) }
             case .thinking(let text, _):
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1459,6 +1460,40 @@ final class MobilePiAppState: ObservableObject {
             parts.append("[images:\(imageCount)]")
         }
         return parts.joined(separator: "\n")
+    }
+
+    private func normalizedFileReferenceForms(in text: String) -> String {
+        var result = text
+        let filePattern = #"<file\b([^>]*)>([\s\S]*?)</file>"#
+        if let regex = try? NSRegularExpression(pattern: filePattern) {
+            let nsText = result as NSString
+            let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsText.length))
+            for match in matches.reversed() {
+                guard let range = Range(match.range, in: result) else { continue }
+                let body = match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound
+                    ? nsText.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    : ""
+                result.replaceSubrange(range, with: body.isEmpty ? "" : "[file]")
+            }
+        }
+
+        // Match the live @/path form with the persisted opaque <file> form.
+        let pathPattern = #"(?<!\w)@((?:/|~/)[^\s<>()\[\]{}"']+)"#
+        if let regex = try? NSRegularExpression(pattern: pathPattern) {
+            let nsText = result as NSString
+            let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsText.length))
+            for match in matches.reversed() {
+                guard match.numberOfRanges > 1,
+                      let fullRange = Range(match.range, in: result),
+                      match.range(at: 1).location != NSNotFound else { continue }
+                let rawPath = nsText.substring(with: match.range(at: 1))
+                let path = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?»”’`*_~"))
+                guard !path.isEmpty else { continue }
+                let suffix = String(rawPath.dropFirst(path.count))
+                result.replaceSubrange(fullRange, with: "[file]\(suffix)")
+            }
+        }
+        return result
     }
 
     private func sortSelectedEventsForDisplay() {
