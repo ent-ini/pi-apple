@@ -113,7 +113,7 @@ package enum SessionEventParser {
             ?? (payload["responseId"] as? String)
             ?? (object["responseId"] as? String)
             ?? stableLineScopedID(kind: "message", lineIndex: lineIndex)
-        var content = parseContent(payload["content"])
+        var content = parseContent(payload["content"], hidingLeakedThinkingControlTags: role == .assistant)
         if content.isEmpty,
            role == .assistant,
            (payload["stopReason"] as? String) == "error",
@@ -163,12 +163,16 @@ package enum SessionEventParser {
         return nil
     }
 
-    private static func parseContent(_ value: Any?) -> [ContentBlock] {
+    private static func parseContent(_ value: Any?, hidingLeakedThinkingControlTags: Bool = false) -> [ContentBlock] {
         if let text = value as? String {
-            return text.isEmpty ? [] : [.text(text)]
+            guard !text.isEmpty,
+                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)) else {
+                return []
+            }
+            return [.text(text)]
         }
         if let blocks = value as? [[String: Any]] {
-            return blocks.compactMap(parseContentBlock)
+            return blocks.compactMap { parseContentBlock($0, hidingLeakedThinkingControlTags: hidingLeakedThinkingControlTags) }
         }
         return []
     }
@@ -222,7 +226,7 @@ package enum SessionEventParser {
                 events.append(.toolCall(call, lineIndex: lineIndex))
                 continue
             }
-            if let contentBlock = parseContentBlock(block) {
+            if let contentBlock = parseContentBlock(block, hidingLeakedThinkingControlTags: true) {
                 if fragmentStartIndex == nil {
                     fragmentStartIndex = blockIndex
                 }
@@ -234,10 +238,14 @@ package enum SessionEventParser {
         return events
     }
 
-    private static func parseContentBlock(_ block: [String: Any]) -> ContentBlock? {
+    private static func parseContentBlock(_ block: [String: Any], hidingLeakedThinkingControlTags: Bool = false) -> ContentBlock? {
         let type = block["type"] as? String
         if type == "text", let text = block["text"] as? String {
-            return text.isEmpty ? nil : .text(text)
+            guard !text.isEmpty,
+                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)) else {
+                return nil
+            }
+            return .text(text)
         }
         if type == "thinking" {
             let signatureValue = block["thinkingSignature"] ?? block["signature"]
@@ -270,9 +278,26 @@ package enum SessionEventParser {
             }
         }
         if let text = block["text"] as? String {
-            return text.isEmpty ? nil : .text(text)
+            guard !text.isEmpty,
+                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)) else {
+                return nil
+            }
+            return .text(text)
         }
         return nil
+    }
+
+    /// Some Anthropic-compatible providers emit a proper `thinking` block and
+    /// then leak its XML boundary as a separate regular text block before a
+    /// tool call. The boundary has no user-visible meaning, so omit only a
+    /// standalone known control tag from assistant output. We deliberately do
+    /// not alter tags embedded in ordinary prose or user messages.
+    private static func isLeakedThinkingControlTag(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.range(
+            of: #"^</?(?:mm:)?think(?:ing)?\s*>$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private static func extractThinkingText(from block: [String: Any], signatureValue: Any?) -> String {

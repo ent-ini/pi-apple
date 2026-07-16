@@ -841,6 +841,30 @@ private func isolatedDefaults() -> UserDefaults {
     }())
 }
 
+@Test func sessionEventParserHidesStandaloneLeakedThinkingTagsFromAssistantMessages() {
+    let events = SessionEventParser.parse(lines: [
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"text","text":"</think>"},{"type":"toolCall","id":"call-1","name":"read","arguments":{}}]}}"#,
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking again"},{"type":"text","text":"</mm:think>"},{"type":"toolCall","id":"call-2","name":"bash","arguments":{}}]}}"#,
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Use </think> literally in this sentence."}]}}"#
+    ])
+
+    #expect(events.count == 5)
+    #expect({
+        guard case .message(let message, _) = events[0] else { return false }
+        return message.content == [.thinking("checking", signature: nil)]
+    }())
+    #expect({ if case .toolCall = events[1] { return true }; return false }())
+    #expect({
+        guard case .message(let message, _) = events[2] else { return false }
+        return message.content == [.thinking("checking again", signature: nil)]
+    }())
+    #expect({ if case .toolCall = events[3] { return true }; return false }())
+    #expect({
+        guard case .message(let message, _) = events[4] else { return false }
+        return message.content == [.text("Use </think> literally in this sentence.")]
+    }())
+}
+
 @Test func sessionEventParserHandlesContentBlocksAndImages() {
     let lines = [
         #"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"see "},{"type":"image","source":{"path":"/tmp/cat.png","media_type":"image/png"}}]}}"#
