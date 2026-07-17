@@ -28,26 +28,37 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
         return trimmed.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
     }
 
-    public static func extract(from events: [SessionEvent]) -> [SubagentSession] {
+    /// Set `includeDetailEvents` to `false` to build lightweight rows without
+    /// eagerly decoding nested transcripts stored in subagent tool results.
+    public static func extract(from events: [SessionEvent], includeDetailEvents: Bool = true) -> [SubagentSession] {
         var calls: [(call: ToolCall, lineIndex: Int)] = []
-        var resultsByCallId: [String: ToolResult] = [:]
+        var subagentCallIDs = Set<String>()
 
         for event in events {
-            switch event {
-            case .toolCall(let call, let lineIndex) where call.name == "subagent":
-                calls.append((call, lineIndex))
-            case .toolResult(let result, _) where result.toolName == "subagent" || calls.contains(where: { $0.call.id == result.callId }):
-                resultsByCallId[result.callId] = result
-            default:
+            guard case .toolCall(let call, let lineIndex) = event,
+                  call.name == "subagent" else {
                 continue
             }
+            calls.append((call, lineIndex))
+            subagentCallIDs.insert(call.id)
+        }
+
+        var resultsByCallId: [String: ToolResult] = [:]
+        for event in events {
+            guard case .toolResult(let result, _) = event,
+                  result.toolName == "subagent" || subagentCallIDs.contains(result.callId) else {
+                continue
+            }
+            resultsByCallId[result.callId] = result
         }
 
         return calls.flatMap { call, lineIndex in
             let specs = SubagentToolArguments.decode(from: call.arguments).expandedSpecs
             let result = resultsByCallId[call.id]
-            var sections = SubagentOutputSection.parse(result?.output ?? "")
-            let detailedEventsByIndex = subagentDetailEventsByIndex(from: result, callLineIndex: lineIndex)
+            var sections = includeDetailEvents ? SubagentOutputSection.parse(result?.output ?? "") : []
+            let detailedEventsByIndex = includeDetailEvents
+                ? subagentDetailEventsByIndex(from: result, callLineIndex: lineIndex)
+                : [:]
 
             return specs.enumerated().map { index, spec in
                 let matchedSectionIndex = sections.firstIndex { section in
@@ -58,10 +69,14 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
                     sections[matchedSectionIndex].isConsumed = true
                 }
 
-                let output = section?.body.nilIfBlank ?? fallbackOutput(for: result, index: index, total: specs.count)
+                let output = includeDetailEvents
+                    ? (section?.body.nilIfBlank ?? fallbackOutput(for: result, index: index, total: specs.count))
+                    : nil
                 let status = result?.isError == true
                     ? "error"
-                    : (section?.status.nilIfBlank ?? (result == nil ? "running" : "completed"))
+                    : (includeDetailEvents
+                        ? (section?.status.nilIfBlank ?? (result == nil ? "running" : "completed"))
+                        : (result == nil ? "running" : "completed"))
 
                 return SubagentSession(
                     id: "subagent:\(call.id):\(index)",
@@ -74,7 +89,9 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
                     output: output,
                     isError: result?.isError ?? false,
                     lineIndex: lineIndex,
-                    events: detailedEventsByIndex[index] ?? fallbackEvents(task: spec.task, output: output, model: spec.displayModel, idPrefix: "subagent:\(call.id):\(index)")
+                    events: includeDetailEvents
+                        ? (detailedEventsByIndex[index] ?? fallbackEvents(task: spec.task, output: output, model: spec.displayModel, idPrefix: "subagent:\(call.id):\(index)"))
+                        : []
                 )
             }
         }
@@ -119,7 +136,11 @@ public struct SubagentSession: Identifiable, Hashable, Sendable {
               let raw = String(data: data, encoding: .utf8) else {
             return []
         }
-        return SessionEventParser.decodeAll(line: raw, at: callLineIndex * 1_000 + messageIndex)
+        // Detail rows are synthetic and are never merged into the parent
+        // session's JSONL timeline. Do not derive their line numbers from the
+        // source call: live tool calls use a near-`Int.max` transient sentinel,
+        // and multiplication would overflow and trap while opening the panel.
+        return SessionEventParser.decodeAll(line: raw, at: messageIndex)
     }
 
     private static func fallbackEvents(task: String?, output: String?, model: String?, idPrefix: String) -> [SessionEvent] {

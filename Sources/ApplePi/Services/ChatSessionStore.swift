@@ -1139,7 +1139,14 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     private func nextTransientLineIndex(for offset: Int) -> Int {
-        Self.transientStreamLineIndexBase + offset
+        // Transient rows only need a stable, post-persisted source position;
+        // their visual ordering is maintained separately by display orders.
+        // Never add to an `Int.max` sentinel: a tool-heavy live turn can exceed
+        // the old fixed headroom and trap the process on integer overflow.
+        let (increment, incrementOverflow) = offset.addingReportingOverflow(1)
+        guard !incrementOverflow else { return Int.max }
+        let (lineIndex, lineIndexOverflow) = lastPersistedLineIndex.addingReportingOverflow(increment)
+        return lineIndexOverflow ? Int.max : lineIndex
     }
 
     private func latestPersistedMessage(matches transientEvent: SessionEvent, in persisted: [SessionEvent]) -> Bool {
@@ -1301,8 +1308,7 @@ final class ChatSession: ObservableObject, Identifiable {
         )
     }
 
-    private static let transientUserLineIndex = Int.max - 2_000
-    private static let transientStreamLineIndexBase = Int.max - 1_000
+    private static let transientUserLineIndex = Int.max
     private static let transientAssistantLineIndex = Int.max
 }
 

@@ -782,7 +782,7 @@ private struct UtilitySidebarSessionContent: View {
         VStack(spacing: 0) {
             UtilitySidebarHeader(
                 title: "Subagents",
-                subtitle: headerSubtitle,
+                subtitle: "Current session",
                 systemImage: "person.2.wave.2"
             )
 
@@ -800,105 +800,154 @@ private struct UtilitySidebarSessionContent: View {
         }
         .background(appState.appearance.sidebarBackgroundColor(for: appState.appearance.resolvedColorScheme(current: colorScheme)))
     }
-
-    private var headerSubtitle: String {
-        guard let session = workspace.selectedTab ?? workspace.tabs.first else {
-            return "Open a chat"
-        }
-        let count = SubagentSession.extract(from: session.events).count
-        if count == 0 { return "No subagents in this session" }
-        return "\(count) subagent\(count == 1 ? "" : "s")"
-    }
 }
 
 private struct UtilitySubagentsPanel: View {
     @EnvironmentObject private var appState: PiAppState
     @ObservedObject var session: ChatSession
+    @State private var subagents: [SubagentSession] = []
     @State private var selectedSubagentID: SubagentSession.ID?
-    @State private var fullSessionEvents: [SessionEvent] = []
-    @State private var loadedFullSessionID: String?
-
-    private var subagents: [SubagentSession] {
-        SubagentSession.extract(from: mergedSessionEvents)
-    }
+    @State private var selectedSubagentDetail: SubagentSession?
+    @State private var isLoadingSubagents = true
+    @State private var isLoadingDetail = false
+    @State private var recentSessionEvents: [SessionEvent] = []
+    @State private var recentSessionEventsRevision = 0
 
     private var mergedSessionEvents: [SessionEvent] {
-        guard !fullSessionEvents.isEmpty else { return session.events }
-        // Prefer the live ChatSession rows so active subagent tool results,
-        // thinking and deltas replace the older full-page snapshot.
+        guard !recentSessionEvents.isEmpty else { return session.events }
+        // Prefer live ChatSession rows so active tool results and deltas
+        // replace the recent server snapshot.
         var seenIDs = Set(session.events.map(\.id))
-        return session.events + fullSessionEvents.filter { seenIDs.insert($0.id).inserted }
+        return session.events + recentSessionEvents.filter { seenIDs.insert($0.id).inserted }
     }
 
-    private var selectedSubagent: SubagentSession? {
-        guard let selectedSubagentID else { return nil }
-        return subagents.first { $0.id == selectedSubagentID }
+    private var extractionRevision: String {
+        "\(session.id.uuidString):\(session.streamRevision):\(session.historyRevision):\(recentSessionEventsRevision)"
     }
 
     var body: some View {
-        Group {
-            if subagents.isEmpty {
-                UtilityEmptyState(
-                    icon: "person.2.slash",
-                    title: "No subagents yet",
-                    message: "When this session uses the subagent tool, spawned agents will appear here."
-                )
-            } else if let selectedSubagent {
-                SubagentDetailView(subagent: selectedSubagent) {
-                    withAnimation(.snappy(duration: 0.16)) {
-                        selectedSubagentID = nil
-                    }
-                }
-            } else {
-                SubagentListView(subagents: subagents, selectedSubagentID: $selectedSubagentID)
-            }
-        }
+        panelContent
         .task(id: session.sessionID ?? session.sessionPath ?? session.id.uuidString) {
-            await loadFullSessionEventsIfAvailable()
+            await loadRecentSessionEvents()
+        }
+        .task(id: extractionRevision) {
+            await refreshSubagents()
         }
         .onChange(of: session.id) { _, _ in
+            subagents = []
             selectedSubagentID = nil
-            fullSessionEvents = []
-            loadedFullSessionID = nil
+            selectedSubagentDetail = nil
+            isLoadingSubagents = true
+            isLoadingDetail = false
+            recentSessionEvents = []
+            recentSessionEventsRevision = 0
         }
         .onChange(of: subagents.map(\.id)) { _, ids in
             guard let selectedSubagentID, !ids.contains(selectedSubagentID) else { return }
             self.selectedSubagentID = nil
+            selectedSubagentDetail = nil
+            isLoadingDetail = false
         }
     }
 
-    private func loadFullSessionEventsIfAvailable() async {
+    @ViewBuilder
+    private var panelContent: some View {
+        if isLoadingSubagents {
+            ProgressView("Loading subagents…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if isLoadingDetail {
+            ProgressView("Loading transcript…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let selectedSubagentDetail {
+            SubagentDetailView(subagent: selectedSubagentDetail) {
+                withAnimation(.snappy(duration: 0.16)) {
+                    selectedSubagentID = nil
+                    self.selectedSubagentDetail = nil
+                }
+            }
+        } else if subagents.isEmpty {
+            UtilityEmptyState(
+                icon: "person.2.slash",
+                title: "No subagents yet",
+                message: "When this session uses the subagent tool, spawned agents will appear here."
+            )
+        } else {
+            SubagentListView(subagents: subagents) { subagent in
+                loadDetail(for: subagent)
+            }
+        }
+    }
+
+    @MainActor
+    private func loadRecentSessionEvents() async {
         guard let sessionID = session.sessionID?.nilIfBlank else {
-            fullSessionEvents = []
-            loadedFullSessionID = nil
+            recentSessionEvents = []
+            recentSessionEventsRevision &+= 1
             return
         }
-        guard loadedFullSessionID != sessionID else { return }
+        let host = appState.host
+        let sessionObjectID = session.id
         do {
+            // A bounded page keeps opening this sidebar predictable even for
+            // multi-megabyte sessions. The live transcript is merged above.
             let page = try await RemoteDaemonClient().loadSessionEventPage(
-                host: appState.host,
+                host: host,
                 sessionID: sessionID,
-                limit: 0
+                limit: 200
             )
-            guard session.sessionID == sessionID else { return }
-            fullSessionEvents = page.events
-            loadedFullSessionID = sessionID
+            guard !Task.isCancelled,
+                  appState.host == host,
+                  session.id == sessionObjectID,
+                  session.sessionID == sessionID else { return }
+            recentSessionEvents = page.events
+            recentSessionEventsRevision &+= 1
         } catch {
-            guard session.sessionID == sessionID else { return }
-            fullSessionEvents = []
-            loadedFullSessionID = sessionID
+            guard !Task.isCancelled, session.id == sessionObjectID else { return }
+            recentSessionEvents = []
+            recentSessionEventsRevision &+= 1
+        }
+    }
+
+    @MainActor
+    private func refreshSubagents() async {
+        // Streaming revisions arrive frequently. Debounce before starting a
+        // detached parse so cancelled intermediate renders never queue work.
+        try? await Task.sleep(for: .milliseconds(180))
+        guard !Task.isCancelled else { return }
+        let events = mergedSessionEvents
+        let sessionObjectID = session.id
+        let summaries = await Task.detached(priority: .userInitiated) {
+            SubagentSession.extract(from: events, includeDetailEvents: false)
+        }.value
+        guard !Task.isCancelled, session.id == sessionObjectID else { return }
+        subagents = summaries
+        isLoadingSubagents = false
+    }
+
+    @MainActor
+    private func loadDetail(for summary: SubagentSession) {
+        selectedSubagentID = summary.id
+        isLoadingDetail = true
+        let events = mergedSessionEvents
+        let sessionObjectID = session.id
+        Task { @MainActor in
+            let detail = await Task.detached(priority: .userInitiated) {
+                SubagentSession.extract(from: events).first { $0.id == summary.id }
+            }.value
+            guard !Task.isCancelled,
+                  session.id == sessionObjectID,
+                  selectedSubagentID == summary.id else { return }
+            selectedSubagentDetail = detail
+            isLoadingDetail = false
         }
     }
 }
 
 private struct SubagentListView: View {
-    @Binding var selectedSubagentID: SubagentSession.ID?
     let subagents: [SubagentSession]
-
-    init(subagents: [SubagentSession], selectedSubagentID: Binding<SubagentSession.ID?>) {
-        self.subagents = subagents
-        self._selectedSubagentID = selectedSubagentID
-    }
+    let onSelect: @MainActor (SubagentSession) -> Void
 
     var body: some View {
         ScrollView {
@@ -906,7 +955,7 @@ private struct SubagentListView: View {
                 ForEach(subagents) { subagent in
                     Button {
                         withAnimation(.snappy(duration: 0.16)) {
-                            selectedSubagentID = subagent.id
+                            onSelect(subagent)
                         }
                     } label: {
                         SubagentListRow(subagent: subagent)

@@ -344,11 +344,24 @@ private struct MacUserAttachmentView: View {
     let attachment: UserVisibleAttachment
     let isUserMessage: Bool
     @State private var previewURL: URL?
+    @State private var inlineImage: NSImage?
     @State private var isLoading = false
     @State private var errorText: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if isImage, let inlineImage {
+                Button(action: previewAttachment) {
+                    Image(nsImage: inlineImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 240, maxHeight: 240)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .help("Preview image")
+            }
+
             HStack(spacing: 8) {
                 Image(systemName: iconName).font(.system(size: 18, weight: .medium))
                 Text(displayName)
@@ -371,6 +384,23 @@ private struct MacUserAttachmentView: View {
         .background(Color.black.opacity(isUserMessage ? 0.12 : 0.05))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .quickLookPreview($previewURL)
+        .task(id: attachment.id) {
+            await loadInlineImageIfNeeded()
+        }
+    }
+
+    private var isImage: Bool {
+        if case .image = attachment.kind { return true }
+        return false
+    }
+
+    private var localImagePath: String? {
+        guard case .image(let path, _, let attachmentID, _) = attachment.kind,
+              attachmentID == nil,
+              !path.hasPrefix("data:") else {
+            return nil
+        }
+        return path
     }
 
     private var displayName: String {
@@ -383,6 +413,29 @@ private struct MacUserAttachmentView: View {
         switch attachment.kind {
         case .image: return "photo"
         case .file(_, _, let isAudio, _, _): return isAudio ? "waveform" : "doc"
+        }
+    }
+
+    @MainActor
+    private func loadInlineImageIfNeeded() async {
+        guard isImage, inlineImage == nil else { return }
+        if let localImagePath {
+            inlineImage = NSImage(contentsOfFile: localImagePath)
+            return
+        }
+        guard attachment.attachmentID != nil else { return }
+
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let file = try await fetch()
+            guard let image = NSImage(data: file.data) else {
+                errorText = "Unable to decode image preview."
+                return
+            }
+            inlineImage = image
+        } catch {
+            errorText = error.localizedDescription
         }
     }
 

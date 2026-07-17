@@ -137,6 +137,30 @@ struct SessionEventParserToolResultTests {
     }
 
     @Test
+    func subagentExtractionDoesNotOverflowForLiveTransientLineIndexes() {
+        let lines = [
+            #"{"type":"message","id":"call-event","message":{"role":"assistant","content":[{"type":"toolCall","id":"live-subagent","name":"subagent","arguments":{"task":"inspect","name":"Live"}}]}}"#,
+            #"{"type":"message","id":"result-event","message":{"role":"toolResult","toolCallId":"live-subagent","toolName":"subagent","content":"done","details":{"results":[{"messages":[{"role":"assistant","content":"completed"}]}]}}}"#
+        ]
+        let parsed = SessionEventParser.parse(lines: lines)
+        let transientEvents = parsed.map { event in
+            switch event {
+            case .toolCall(let call, _):
+                .toolCall(call, lineIndex: Int.max - 1)
+            case .toolResult(let result, _):
+                .toolResult(result, lineIndex: Int.max - 1)
+            default:
+                event
+            }
+        }
+
+        let subagents = SubagentSession.extract(from: transientEvents)
+
+        #expect(subagents.count == 1)
+        #expect(subagents.first?.events.isEmpty == false)
+    }
+
+    @Test
     func toolResultRoleMessageRendersStructuredTextContentAsPlainOutput() {
         // Some tools return `content` as an array of typed text blocks.
         // The UI should show the tool's actual text output, not raw JSON.

@@ -165,14 +165,16 @@ package enum SessionEventParser {
 
     private static func parseContent(_ value: Any?, hidingLeakedThinkingControlTags: Bool = false) -> [ContentBlock] {
         if let text = value as? String {
-            guard !text.isEmpty,
-                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)) else {
-                return []
-            }
-            return [.text(text)]
+            return parseTextContentBlocks(
+                text,
+                extractingThinkingTags: hidingLeakedThinkingControlTags,
+                hidingLeakedThinkingControlTags: hidingLeakedThinkingControlTags
+            )
         }
         if let blocks = value as? [[String: Any]] {
-            return blocks.compactMap { parseContentBlock($0, hidingLeakedThinkingControlTags: hidingLeakedThinkingControlTags) }
+            return blocks.flatMap {
+                parseContentBlocks($0, hidingLeakedThinkingControlTags: hidingLeakedThinkingControlTags)
+            }
         }
         return []
     }
@@ -227,15 +229,16 @@ package enum SessionEventParser {
                 events.append(.toolCall(call, lineIndex: lineIndex))
                 continue
             }
-            if let contentBlock = parseContentBlock(
+            let contentBlocks = parseContentBlocks(
                 block,
                 hidingLeakedThinkingControlTags: true,
                 hidingLeakedThinkingPunctuation: hasThinking && hasToolCall
-            ) {
+            )
+            if !contentBlocks.isEmpty {
                 if fragmentStartIndex == nil {
                     fragmentStartIndex = blockIndex
                 }
-                fragmentBlocks.append(contentBlock)
+                fragmentBlocks.append(contentsOf: contentBlocks)
             }
         }
 
@@ -243,59 +246,101 @@ package enum SessionEventParser {
         return events
     }
 
-    private static func parseContentBlock(
+    private static func parseContentBlocks(
         _ block: [String: Any],
         hidingLeakedThinkingControlTags: Bool = false,
         hidingLeakedThinkingPunctuation: Bool = false
-    ) -> ContentBlock? {
+    ) -> [ContentBlock] {
         let type = block["type"] as? String
         if type == "text", let text = block["text"] as? String {
-            guard !text.isEmpty,
-                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)),
-                  !(hidingLeakedThinkingPunctuation && isLeakedThinkingPunctuation(text)) else {
-                return nil
-            }
-            return .text(text)
+            return parseTextContentBlocks(
+                text,
+                extractingThinkingTags: hidingLeakedThinkingControlTags,
+                hidingLeakedThinkingControlTags: hidingLeakedThinkingControlTags,
+                hidingLeakedThinkingPunctuation: hidingLeakedThinkingPunctuation
+            )
         }
         if type == "thinking" {
             let signatureValue = block["thinkingSignature"] ?? block["signature"]
             let thinking = extractThinkingText(from: block, signatureValue: signatureValue)
             let signature = stringifySignature(signatureValue)
-            return thinking.isEmpty ? nil : .thinking(thinking, signature: signature)
+            return thinking.isEmpty ? [] : [.thinking(thinking, signature: signature)]
         }
         if type == "image" {
             let blockMime = (block["mimeType"] as? String) ?? (block["media_type"] as? String)
             if let source = block["source"] as? [String: Any],
                let path = source["path"] as? String {
                 let sourceMime = (source["mimeType"] as? String) ?? (source["media_type"] as? String)
-                return .image(path: path, mime: sourceMime ?? blockMime)
+                return [.image(path: path, mime: sourceMime ?? blockMime)]
             }
             if let path = block["path"] as? String {
-                return .image(path: path, mime: blockMime)
+                return [.image(path: path, mime: blockMime)]
             }
             if let fileName = block["fileName"] as? String {
-                return .image(path: fileName, mime: blockMime)
+                return [.image(path: fileName, mime: blockMime)]
             }
             if let source = block["source"] as? [String: Any],
                let data = source["data"] as? String {
                 let sourceMime = (source["mimeType"] as? String) ?? (source["media_type"] as? String)
                 let mime = sourceMime ?? blockMime ?? "image/png"
-                return .image(path: "data:\(mime);base64,\(data)", mime: mime)
+                return [.image(path: "data:\(mime);base64,\(data)", mime: mime)]
             }
             if let data = block["data"] as? String {
                 let mime = blockMime ?? "image/png"
-                return .image(path: "data:\(mime);base64,\(data)", mime: mime)
+                return [.image(path: "data:\(mime);base64,\(data)", mime: mime)]
             }
         }
         if let text = block["text"] as? String {
-            guard !text.isEmpty,
-                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)),
-                  !(hidingLeakedThinkingPunctuation && isLeakedThinkingPunctuation(text)) else {
-                return nil
-            }
-            return .text(text)
+            return parseTextContentBlocks(
+                text,
+                extractingThinkingTags: hidingLeakedThinkingControlTags,
+                hidingLeakedThinkingControlTags: hidingLeakedThinkingControlTags,
+                hidingLeakedThinkingPunctuation: hidingLeakedThinkingPunctuation
+            )
         }
-        return nil
+        return []
+    }
+
+    private static func parseTextContentBlocks(
+        _ text: String,
+        extractingThinkingTags: Bool,
+        hidingLeakedThinkingControlTags: Bool,
+        hidingLeakedThinkingPunctuation: Bool = false
+    ) -> [ContentBlock] {
+        guard !text.isEmpty,
+              !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)),
+              !(hidingLeakedThinkingPunctuation && isLeakedThinkingPunctuation(text)) else {
+            return []
+        }
+        guard extractingThinkingTags else { return [.text(text)] }
+
+        let pattern = #"(?is)<(?:mm:)?think(?:ing)?\b[^>]*>(.*?)</(?:mm:)?think(?:ing)?\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [.text(text)] }
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard !matches.isEmpty else { return [.text(text)] }
+
+        var content: [ContentBlock] = []
+        var cursor = text.startIndex
+        for match in matches {
+            guard let fullRange = Range(match.range(at: 0), in: text),
+                  let thinkingRange = Range(match.range(at: 1), in: text) else {
+                continue
+            }
+            let visibleText = String(text[cursor..<fullRange.lowerBound])
+            if !visibleText.isEmpty {
+                content.append(.text(visibleText))
+            }
+            let thinking = String(text[thinkingRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !thinking.isEmpty {
+                content.append(.thinking(thinking, signature: nil))
+            }
+            cursor = fullRange.upperBound
+        }
+        let trailingText = String(text[cursor...])
+        if !trailingText.isEmpty {
+            content.append(.text(trailingText))
+        }
+        return content
     }
 
     /// Some Anthropic-compatible providers emit a proper `thinking` block and
