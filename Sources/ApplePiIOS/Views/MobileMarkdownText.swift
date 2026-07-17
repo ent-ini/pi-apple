@@ -386,6 +386,7 @@ private struct MobileMarkdownTablePreview: View {
             MobileMarkdownTableGrid(table: table, minColumnWidth: 104, maxColumnWidth: 360)
                 .fixedSize(horizontal: true, vertical: true)
         }
+        #if os(iOS)
         .overlay(alignment: .topTrailing) {
             Button {
                 isExpanded = true
@@ -400,13 +401,17 @@ private struct MobileMarkdownTablePreview: View {
             .accessibilityLabel("Open table in full screen")
             .padding(6)
         }
+        #endif
         .textSelection(.disabled)
+        #if os(iOS)
         .fullScreenCover(isPresented: $isExpanded) {
             MobileMarkdownTableExpandedView(table: table)
         }
+        #endif
     }
 }
 
+#if os(iOS)
 private struct MobileMarkdownTableExpandedView: View {
     let table: MobileMarkdownTable
     @Environment(\.dismiss) private var dismiss
@@ -428,6 +433,8 @@ private struct MobileMarkdownTableExpandedView: View {
         }
     }
 }
+
+#endif
 
 private struct MobileMarkdownTableGrid: View {
     let table: MobileMarkdownTable
