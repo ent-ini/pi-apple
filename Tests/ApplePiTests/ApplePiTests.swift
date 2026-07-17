@@ -865,6 +865,24 @@ private func isolatedDefaults() -> UserDefaults {
     }())
 }
 
+@Test func sessionEventParserHidesStandaloneMiniMaxPunctuationBetweenThinkingAndToolCall() {
+    let events = SessionEventParser.parse(lines: [
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"text","text":"."},{"type":"toolCall","id":"call-1","name":"bash","arguments":{}}]}}"#,
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"."}]}}"#
+    ])
+
+    #expect(events.count == 3)
+    #expect({
+        guard case .message(let message, _) = events[0] else { return false }
+        return message.content == [.thinking("checking", signature: nil)]
+    }())
+    #expect({ if case .toolCall = events[1] { return true }; return false }())
+    #expect({
+        guard case .message(let message, _) = events[2] else { return false }
+        return message.content == [.text(".")]
+    }())
+}
+
 @Test func sessionEventParserHandlesContentBlocksAndImages() {
     let lines = [
         #"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"see "},{"type":"image","source":{"path":"/tmp/cat.png","media_type":"image/png"}}]}}"#

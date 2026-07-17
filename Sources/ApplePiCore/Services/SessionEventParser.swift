@@ -190,6 +190,7 @@ package enum SessionEventParser {
         var fragmentBlocks: [ContentBlock] = []
         var fragmentStartIndex: Int?
         let hasToolCall = rawBlocks.contains { parseToolCallFromContentBlock($0, fallbackID: "toolCall:probe") != nil }
+        let hasThinking = rawBlocks.contains { ($0["type"] as? String) == "thinking" }
 
         func flushFragment() {
             guard !fragmentBlocks.isEmpty else { return }
@@ -226,7 +227,11 @@ package enum SessionEventParser {
                 events.append(.toolCall(call, lineIndex: lineIndex))
                 continue
             }
-            if let contentBlock = parseContentBlock(block, hidingLeakedThinkingControlTags: true) {
+            if let contentBlock = parseContentBlock(
+                block,
+                hidingLeakedThinkingControlTags: true,
+                hidingLeakedThinkingPunctuation: hasThinking && hasToolCall
+            ) {
                 if fragmentStartIndex == nil {
                     fragmentStartIndex = blockIndex
                 }
@@ -238,11 +243,16 @@ package enum SessionEventParser {
         return events
     }
 
-    private static func parseContentBlock(_ block: [String: Any], hidingLeakedThinkingControlTags: Bool = false) -> ContentBlock? {
+    private static func parseContentBlock(
+        _ block: [String: Any],
+        hidingLeakedThinkingControlTags: Bool = false,
+        hidingLeakedThinkingPunctuation: Bool = false
+    ) -> ContentBlock? {
         let type = block["type"] as? String
         if type == "text", let text = block["text"] as? String {
             guard !text.isEmpty,
-                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)) else {
+                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)),
+                  !(hidingLeakedThinkingPunctuation && isLeakedThinkingPunctuation(text)) else {
                 return nil
             }
             return .text(text)
@@ -279,7 +289,8 @@ package enum SessionEventParser {
         }
         if let text = block["text"] as? String {
             guard !text.isEmpty,
-                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)) else {
+                  !(hidingLeakedThinkingControlTags && isLeakedThinkingControlTag(text)),
+                  !(hidingLeakedThinkingPunctuation && isLeakedThinkingPunctuation(text)) else {
                 return nil
             }
             return .text(text)
@@ -298,6 +309,11 @@ package enum SessionEventParser {
             of: #"^</?(?:mm:)?think(?:ing)?\s*>$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
+    }
+
+    private static func isLeakedThinkingPunctuation(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed == "." || trimmed == "。"
     }
 
     private static func extractThinkingText(from block: [String: Any], signatureValue: Any?) -> String {
