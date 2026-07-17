@@ -89,6 +89,28 @@ func TestOutboundAttachmentReferenceIsStoredOncePerMessage(t *testing.T) {
 	}
 }
 
+func TestOutboundAttachmentReferenceImportsFileOutsideBrowsableRoots(t *testing.T) {
+	store := newAttachmentTestStore(t)
+	home := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv("HOME", home)
+	artifact := filepath.Join(outside, "report.tsv")
+	if err := os.WriteFile(artifact, []byte("durable outbound file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{agentDir: filepath.Join(home, ".pi", "agent"), attachments: store}
+	raw := `{"type":"message_end","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"Ready: @` + artifact + `."}]}}`
+	session := sessionRecord{ID: "session-1", WorkingDirectory: home}
+
+	decorated := srv.decorateOutboundAttachmentRecord(context.Background(), session, raw)
+	if strings.Contains(decorated, artifact) || !strings.Contains(decorated, `attachment-id=\"att_`) {
+		t.Fatalf("outside-root reference was not converted to an opaque attachment: %s", decorated)
+	}
+	if _, err := srv.resolveFileReferencePath(artifact, ""); err == nil {
+		t.Fatal("interactive file endpoint must continue rejecting outside paths")
+	}
+}
+
 func TestAttachmentContentRouteOnlyAcceptsOpaqueID(t *testing.T) {
 	store := newAttachmentTestStore(t)
 	record, err := store.Upload(context.Background(), bytes.NewBufferString("test data"), "report.txt", "text/plain")

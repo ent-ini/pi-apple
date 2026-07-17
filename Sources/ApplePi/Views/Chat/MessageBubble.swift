@@ -529,7 +529,7 @@ private struct MacUserAttachmentView: View {
                     return
                 }
                 let file = try await fetch()
-                previewURL = try materializePreview(data: file.data, fileName: file.fileName)
+                previewURL = try materializePreview(data: file.data, fileName: resolvedFileName(for: file))
             } catch { errorText = error.localizedDescription }
         }
     }
@@ -547,16 +547,25 @@ private struct MacUserAttachmentView: View {
             do {
                 let file = try await fetch()
                 let panel = NSSavePanel()
-                panel.nameFieldStringValue = safeName(file.fileName)
+                panel.nameFieldStringValue = resolvedFileName(for: file)
                 guard panel.runModal() == .OK, let url = panel.url else { return }
                 try file.data.write(to: url, options: .atomic)
             } catch { errorText = error.localizedDescription }
         }
     }
 
-    private func safeName(_ value: String) -> String {
-        value.components(separatedBy: CharacterSet(charactersIn: "/:\\"))
-            .filter { !$0.isEmpty }.joined(separator: "-").nilIfBlank ?? "attachment"
+    private func resolvedFileName(for file: RemoteFileDownload) -> String {
+        AttachmentPreviewFilename.resolve(
+            downloadedName: file.fileName,
+            displayName: displayName,
+            mimeType: file.mimeType ?? attachmentMimeType
+        )
+    }
+
+    private var attachmentMimeType: String? {
+        switch attachment.kind {
+        case .image(_, let mime, _, _), .file(_, _, _, _, let mime): return mime
+        }
     }
 }
 

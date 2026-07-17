@@ -256,7 +256,7 @@ struct ChatFileReferenceCard: View {
                 let file = try await fetchFile()
                 await MainActor.run {
                     let panel = NSSavePanel()
-                    panel.nameFieldStringValue = file.fileName.nilIfBlank ?? reference.displayName
+                    panel.nameFieldStringValue = resolvedFileName(for: file)
                     panel.canCreateDirectories = true
                     panel.begin { response in
                         guard response == .OK, let url = panel.url else { return }
@@ -279,7 +279,7 @@ struct ChatFileReferenceCard: View {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pi-app-file-previews", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let safeName = sanitizeFileName(file.fileName.nilIfBlank ?? reference.displayName)
+        let safeName = resolvedFileName(for: file)
         let url = directory.appendingPathComponent("\(UUID().uuidString)-\(safeName)")
         try file.data.write(to: url, options: .atomic)
         return url
@@ -296,9 +296,11 @@ struct ChatFileReferenceCard: View {
         )
     }
 
-    private func sanitizeFileName(_ value: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/:\\")
-        let parts = value.components(separatedBy: invalid).filter { !$0.isEmpty }
-        return parts.joined(separator: "-").nilIfBlank ?? "file"
+    private func resolvedFileName(for file: RemoteFileDownload) -> String {
+        AttachmentPreviewFilename.resolve(
+            downloadedName: file.fileName,
+            displayName: reference.displayName,
+            mimeType: file.mimeType ?? reference.mimeType
+        )
     }
 }

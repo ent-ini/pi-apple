@@ -1628,6 +1628,33 @@ func (s *server) resolveBrowsablePath(requested string) (string, error) {
 }
 
 func (s *server) resolveFileReferencePath(requested string, base string) (string, error) {
+	realPath, err := s.resolveExistingPath(requested, base)
+	if err != nil {
+		return "", err
+	}
+	if !s.isBrowsablePath(realPath) {
+		return "", errors.New("path is outside allowed roots")
+	}
+	return realPath, nil
+}
+
+// resolveOutboundFileReferencePath resolves an assistant-authored @path before
+// copying it into opaque attachment storage. This intentionally does not use
+// the interactive /file browser allowlist: the client cannot choose this path,
+// and the result is a bounded, immutable snapshot addressed only by its ID.
+func (s *server) resolveOutboundFileReferencePath(requested string, base string) (string, error) {
+	path, err := s.resolveExistingPath(requested, base)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errors.New("path is not a regular file")
+	}
+	return path, nil
+}
+
+func (s *server) resolveExistingPath(requested string, base string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	if requested == "" {
 		return "", errors.New("invalid path")
@@ -1647,11 +1674,7 @@ func (s *server) resolveFileReferencePath(requested string, base string) (string
 	if err != nil {
 		return "", errors.New("path does not exist")
 	}
-	realPath = filepath.Clean(realPath)
-	if !s.isBrowsablePath(realPath) {
-		return "", errors.New("path is outside allowed roots")
-	}
-	return realPath, nil
+	return filepath.Clean(realPath), nil
 }
 
 func (s *server) isBrowsablePath(path string) bool {
@@ -2149,7 +2172,7 @@ func (s *server) replaceOutboundFileReferences(ctx context.Context, session sess
 		if pathValue == "" || !strings.Contains(pathValue, "/") {
 			continue
 		}
-		path, err := s.resolveFileReferencePath(pathValue, session.WorkingDirectory)
+		path, err := s.resolveOutboundFileReferencePath(pathValue, session.WorkingDirectory)
 		if err != nil {
 			continue
 		}

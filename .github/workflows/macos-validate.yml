@@ -1,0 +1,20 @@
+name: macOS validation
+
+on:
+  push:
+    branches:
+      - feature/ios-universal-foundation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: swift test
+      - name: Build signed app bundle
+        run: script/package_release.sh --no-zip
