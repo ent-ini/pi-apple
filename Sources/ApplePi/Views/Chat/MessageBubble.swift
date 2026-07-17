@@ -537,7 +537,12 @@ private struct MacUserAttachmentView: View {
     private func materializePreview(data: Data, fileName: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-app-attachments", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("\(UUID().uuidString)-\(safeName(fileName))")
+        let name = AttachmentPreviewFilename.resolve(
+            downloadedName: fileName,
+            displayName: displayName,
+            mimeType: attachmentMimeType
+        )
+        let url = directory.appendingPathComponent("\(UUID().uuidString)-\(name)")
         try data.write(to: url, options: .atomic)
         return url
     }
