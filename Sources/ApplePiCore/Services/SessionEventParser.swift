@@ -316,31 +316,17 @@ package enum SessionEventParser {
 
         let pattern = #"(?is)<(?:mm:)?think(?:ing)?\b[^>]*>(.*?)</(?:mm:)?think(?:ing)?\s*>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [.text(text)] }
-        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-        guard !matches.isEmpty else { return [.text(text)] }
-
-        var content: [ContentBlock] = []
-        var cursor = text.startIndex
-        for match in matches {
-            guard let fullRange = Range(match.range(at: 0), in: text),
-                  let thinkingRange = Range(match.range(at: 1), in: text) else {
-                continue
-            }
-            let visibleText = String(text[cursor..<fullRange.lowerBound])
-            if !visibleText.isEmpty {
-                content.append(.text(visibleText))
-            }
-            let thinking = String(text[thinkingRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !thinking.isEmpty {
-                content.append(.thinking(thinking, signature: nil))
-            }
-            cursor = fullRange.upperBound
+        let fullTextRange = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: fullTextRange),
+              match.range(at: 0) == fullTextRange,
+              let thinkingRange = Range(match.range(at: 1), in: text) else {
+            // A literal `<think>…</think>` in prose or inline code must stay
+            // visible text. Treat only a complete assistant payload wrapped
+            // in those tags as provider-emitted reasoning.
+            return [.text(text)]
         }
-        let trailingText = String(text[cursor...])
-        if !trailingText.isEmpty {
-            content.append(.text(trailingText))
-        }
-        return content
+        let thinking = String(text[thinkingRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return thinking.isEmpty ? [] : [.thinking(thinking, signature: nil)]
     }
 
     /// Some Anthropic-compatible providers emit a proper `thinking` block and

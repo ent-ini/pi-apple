@@ -73,11 +73,6 @@ private struct UserMessagePresentation {
     }
 
     static func build(from blocks: [ContentBlock]) -> UserMessagePresentation {
-        let hasRenderedImageBlock = blocks.contains {
-            if case .image = $0 { return true }
-            return false
-        }
-
         var explicitImages: [UserVisibleAttachment] = []
         var extractedAttachments: [UserVisibleAttachment] = []
         var textFragments: [String] = []
@@ -85,9 +80,13 @@ private struct UserMessagePresentation {
         for block in blocks {
             switch block {
             case .text(let rawText):
+                // A persisted user message may contain both a generic image
+                // block and an authoritative `<file attachment-id=...>` tag.
+                // Always inspect the tag so its remote ID can replace the
+                // non-downloadable generic block after the send completes.
                 let extraction = extractAttachmentsAndText(
                     from: rawText,
-                    includeImageTags: !hasRenderedImageBlock
+                    includeImageTags: true
                 )
                 extractedAttachments.append(contentsOf: extraction.attachments)
                 if !extraction.text.isEmpty {
