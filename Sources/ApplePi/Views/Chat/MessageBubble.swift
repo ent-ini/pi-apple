@@ -376,19 +376,40 @@ private struct MacUserAttachmentView: View {
     @State private var errorText: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if isImage, let inlineImage {
-                Button(action: previewAttachment) {
-                    Image(nsImage: inlineImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 240, maxHeight: 240)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .help("Preview image")
+        Group {
+            if isImage {
+                imageContent
+            } else {
+                fileContent
             }
+        }
+        .quickLookPreview($previewURL)
+        .task(id: attachment.id) {
+            await loadInlineImageIfNeeded()
+        }
+    }
 
+    @ViewBuilder
+    private var imageContent: some View {
+        if let inlineImage {
+            Button(action: previewAttachment) {
+                Image(nsImage: inlineImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 240, maxHeight: 240)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Preview image")
+        } else if isLoading {
+            ProgressView().controlSize(.small)
+        } else if let errorText {
+            Text(errorText).font(.caption).foregroundStyle(.red).lineLimit(2)
+        }
+    }
+
+    private var fileContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: iconName).font(.system(size: 18, weight: .medium))
                 Text(displayName)
@@ -410,10 +431,6 @@ private struct MacUserAttachmentView: View {
         .padding(10)
         .background(Color.black.opacity(isUserMessage ? 0.12 : 0.05))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .quickLookPreview($previewURL)
-        .task(id: attachment.id) {
-            await loadInlineImageIfNeeded()
-        }
     }
 
     private var isImage: Bool {
@@ -491,14 +508,26 @@ private struct MacUserAttachmentView: View {
             isLoading = true
             defer { isLoading = false }
             do {
+                if let embeddedImageData {
+                    previewURL = try materializePreview(data: embeddedImageData, fileName: displayName)
+                    return
+                }
+                if let localImagePath {
+                    previewURL = URL(fileURLWithPath: localImagePath)
+                    return
+                }
                 let file = try await fetch()
-                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-app-attachments", isDirectory: true)
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let url = directory.appendingPathComponent("\(UUID().uuidString)-\(safeName(file.fileName))")
-                try file.data.write(to: url, options: .atomic)
-                previewURL = url
+                previewURL = try materializePreview(data: file.data, fileName: file.fileName)
             } catch { errorText = error.localizedDescription }
         }
+    }
+
+    private func materializePreview(data: Data, fileName: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-app-attachments", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(UUID().uuidString)-\(safeName(fileName))")
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     private func saveAttachment() {
