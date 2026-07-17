@@ -224,20 +224,7 @@ final class ChatSession: ObservableObject, Identifiable {
         currentSendReconciliationMinimumLineIndex = max(lastPersistedLineIndex + 1, 0)
         claimedPersistedReconciliationIDs = []
 
-        var content: [ContentBlock] = attachments.map { attachment in
-            switch attachment.kind {
-            case .image:
-                return .image(path: attachment.filePath, mime: attachment.mimeType)
-            case .file:
-                return .text(
-                    "<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Binary file attached: \(attachment.displayName.xmlEscapedForPrompt)]</file>"
-                )
-            case .audio:
-                return .text(
-                    "<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Audio attachment: \(attachment.displayName.xmlEscapedForPrompt)]</file>"
-                )
-            }
-        }
+        var content: [ContentBlock] = attachments.map(Self.initialOptimisticContentBlock)
         if !prompt.isEmpty {
             content.append(.text(prompt))
         }
@@ -279,7 +266,15 @@ final class ChatSession: ObservableObject, Identifiable {
         let messageID = "optimistic-user-\(operationID.uuidString.lowercased())"
         guard case .message(let existing, let lineIndex)? = transientUserEvent,
               existing.id == messageID else { return }
-        var content = Self.optimisticContentBlocks(attachments, sourceAttachments: sourceAttachments)
+        let cachedImagePaths = existing.content.compactMap { block -> String? in
+            if case .image(let path, _) = block { return path }
+            return nil
+        }
+        var content = Self.optimisticContentBlocks(
+            attachments,
+            sourceAttachments: sourceAttachments,
+            cachedImagePaths: cachedImagePaths
+        )
         if !prompt.isEmpty { content.append(.text(prompt)) }
         transientUserEvent = .message(
             Message(id: messageID, role: .user, content: content, model: nil, timestamp: existing.timestamp, parentId: nil),
@@ -300,34 +295,70 @@ final class ChatSession: ObservableObject, Identifiable {
         rebuildEvents()
     }
 
+    private static func initialOptimisticContentBlock(_ attachment: ChatAttachment) -> ContentBlock {
+        switch attachment.kind {
+        case .image:
+            if let data = try? Data(contentsOf: attachment.fileURL) {
+                let mime = attachment.mimeType ?? "image/png"
+                return .image(path: "data:\(mime);base64,\(data.base64EncodedString())", mime: mime)
+            }
+            return .image(path: attachment.filePath, mime: attachment.mimeType)
+        case .file:
+            return .text(
+                "<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Binary file attached: \(attachment.displayName.xmlEscapedForPrompt)]</file>"
+            )
+        case .audio:
+            return .text(
+                "<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Audio attachment: \(attachment.displayName.xmlEscapedForPrompt)]</file>"
+            )
+        }
+    }
+
     private static func optimisticContentBlocks(
         _ attachments: [UploadedAttachmentReference],
-        sourceAttachments: [ChatAttachment]
+        sourceAttachments: [ChatAttachment],
+        cachedImagePaths: [String] = []
     ) -> [ContentBlock] {
-        attachments.enumerated().map { index, attachment in
+        var cachedImageIndex = 0
+        return attachments.enumerated().map { index, attachment in
             let source = sourceAttachments.indices.contains(index) ? sourceAttachments[index] : nil
-            return optimisticContentBlock(attachment, source: source)
+            let cachedImagePath: String?
+            if source?.isImage == true {
+                cachedImagePath = cachedImagePaths.indices.contains(cachedImageIndex)
+                    ? cachedImagePaths[cachedImageIndex]
+                    : nil
+                cachedImageIndex += 1
+            } else {
+                cachedImagePath = nil
+            }
+            return optimisticContentBlock(attachment, source: source, cachedImagePath: cachedImagePath)
         }
     }
 
     private static func optimisticContentBlock(
         _ attachment: UploadedAttachmentReference,
-        source: ChatAttachment?
+        source: ChatAttachment?,
+        cachedImagePath: String?
     ) -> ContentBlock {
         let name = attachment.fileName.xmlEscapedForPrompt
         let mime = attachment.mimeType ?? source?.mimeType ?? "application/octet-stream"
-        if mime.lowercased().hasPrefix("image/"),
-           source?.kind == .image,
-           let sourceURL = source?.fileURL,
-           let data = try? Data(contentsOf: sourceURL) {
-            // Uploading succeeds before pi-appd has persisted/decorated the
-            // turn. Keep an inline snapshot in the optimistic row so the
-            // staged file can be deleted without a visible photo gap.
-            return .image(path: "data:\(mime);base64,\(data.base64EncodedString())", mime: mime)
+        if mime.lowercased().hasPrefix("image/") {
+            if let cachedImagePath, cachedImagePath.hasPrefix("data:") {
+                return .image(path: cachedImagePath, mime: mime)
+            }
+            if source?.kind == .image,
+               let sourceURL = source?.fileURL,
+               let data = try? Data(contentsOf: sourceURL) {
+                return .image(path: "data:\(mime);base64,\(data.base64EncodedString())", mime: mime)
+            }
         }
         guard let id = attachment.id?.nilIfBlank else { return .text("[File attached: \(name)]") }
         let reference = "pi-attachment://\(id)/\(name)"
-        if mime.lowercased().hasPrefix("image/") { return .image(path: reference, mime: mime) }
+        if mime.lowercased().hasPrefix("image/") {
+            // Do not emit an unresolvable pi-attachment image path. The file
+            // form retains the remote ID so the renderer can fetch it.
+            return .text("<file name=\"\(reference)\" attachment-id=\"\(id)\" attachment-name=\"\(name)\" attachment-mime=\"\(mime.xmlEscapedForPrompt)\"></file>")
+        }
         let label = mime.lowercased().hasPrefix("audio/") ? "Audio attachment" : "File attached"
         return .text("<file name=\"\(reference)\" attachment-id=\"\(id)\" attachment-name=\"\(name)\" attachment-mime=\"\(mime.xmlEscapedForPrompt)\">[\(label): \(name)]</file>")
     }
@@ -402,16 +433,7 @@ final class ChatSession: ObservableObject, Identifiable {
     }
 
     func appendSteeringPrompt(_ prompt: String, attachments: [ChatAttachment] = [], operationID: UUID = UUID()) {
-        var content: [ContentBlock] = attachments.map { attachment in
-            switch attachment.kind {
-            case .image:
-                return .image(path: attachment.filePath, mime: attachment.mimeType)
-            case .file:
-                return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Binary file attached: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
-            case .audio:
-                return .text("<file name=\"\(attachment.filePath.xmlEscapedForPrompt)\">[Audio attachment: \(attachment.displayName.xmlEscapedForPrompt)]</file>")
-            }
-        }
+        var content: [ContentBlock] = attachments.map(Self.initialOptimisticContentBlock)
         if !prompt.isEmpty {
             content.append(.text(prompt))
         }
@@ -443,7 +465,15 @@ final class ChatSession: ObservableObject, Identifiable {
             if case .message(let message, _) = event { return message.id == messageID }
             return false
         }), case .message(let existing, let lineIndex) = transientStreamEvents[index] else { return }
-        var content = Self.optimisticContentBlocks(attachments, sourceAttachments: sourceAttachments)
+        let cachedImagePaths = existing.content.compactMap { block -> String? in
+            if case .image(let path, _) = block { return path }
+            return nil
+        }
+        var content = Self.optimisticContentBlocks(
+            attachments,
+            sourceAttachments: sourceAttachments,
+            cachedImagePaths: cachedImagePaths
+        )
         if !prompt.isEmpty { content.append(.text(prompt)) }
         transientStreamEvents[index] = .message(
             Message(id: messageID, role: .user, content: content, model: nil, timestamp: existing.timestamp, parentId: nil),
