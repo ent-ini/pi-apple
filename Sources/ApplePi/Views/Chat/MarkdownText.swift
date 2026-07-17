@@ -9,7 +9,6 @@ import ApplePiRemote
 /// quotes, GitHub-flavored pipe tables, horizontal rules, and fenced code blocks.
 struct MarkdownText: View {
     let text: String
-    @State private var expandedTable: ExpandedMarkdownTable?
 
     init(_ text: String) {
         self.text = text
@@ -33,9 +32,6 @@ struct MarkdownText: View {
                 }
             }
             .textSelection(.enabled)
-            .sheet(item: $expandedTable) { item in
-                MarkdownTableExpandedView(table: item.table)
-            }
         }
     }
 
@@ -115,23 +111,7 @@ struct MarkdownText: View {
     }
 
     private func tableView(_ table: MarkdownTable) -> some View {
-        ZStack(alignment: .topTrailing) {
-            ScrollView(.horizontal, showsIndicators: true) {
-                MarkdownTableGrid(table: table, minColumnWidth: 112, maxColumnWidth: 760)
-                    .fixedSize(horizontal: true, vertical: true)
-            }
-            Button {
-                expandedTable = ExpandedMarkdownTable(table: table)
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.caption.weight(.semibold))
-                    .padding(7)
-                    .background(.regularMaterial, in: Circle())
-            }
-            .buttonStyle(.borderless)
-            .help("Open table in a larger view")
-            .padding(6)
-        }
+        MarkdownTablePreview(table: table)
     }
 
     private func inlineMarkdownText(_ text: String) -> Text {
@@ -411,6 +391,37 @@ struct MarkdownText: View {
         return withoutSpaces.allSatisfy { $0 == "-" }
             || withoutSpaces.allSatisfy { $0 == "*" }
             || withoutSpaces.allSatisfy { $0 == "_" }
+    }
+}
+
+private struct MarkdownTablePreview: View {
+    let table: MarkdownTable
+    @State private var expandedTable: ExpandedMarkdownTable?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ScrollView(.horizontal, showsIndicators: true) {
+                MarkdownTableGrid(table: table, minColumnWidth: 112, maxColumnWidth: 760)
+                    .fixedSize(horizontal: true, vertical: true)
+            }
+            Button {
+                expandedTable = ExpandedMarkdownTable(table: table)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption.weight(.semibold))
+                    .padding(7)
+                    .background(.regularMaterial, in: Circle())
+            }
+            .buttonStyle(.borderless)
+            .help("Open table in a larger view")
+            .padding(6)
+        }
+        // The parent message supports drag-to-select text. Disable that mode
+        // for the interactive table control so its button receives clicks.
+        .textSelection(.disabled)
+        .sheet(item: $expandedTable) { item in
+            MarkdownTableExpandedView(table: item.table)
+        }
     }
 }
 

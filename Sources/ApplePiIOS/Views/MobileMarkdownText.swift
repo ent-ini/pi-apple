@@ -7,7 +7,6 @@ import SwiftUI
 /// quotes, code fences, pipe tables, and horizontal rules.
 struct MobileMarkdownText: View {
     let text: String
-    @State private var expandedTable: ExpandedMobileMarkdownTable?
 
     init(_ text: String) {
         self.text = text
@@ -26,9 +25,6 @@ struct MobileMarkdownText: View {
                 }
             }
             .textSelection(.enabled)
-            .fullScreenCover(item: $expandedTable) { item in
-                MobileMarkdownTableExpandedView(table: item.table)
-            }
         }
     }
 
@@ -108,23 +104,7 @@ struct MobileMarkdownText: View {
     }
 
     private func tableView(_ table: MobileMarkdownTable) -> some View {
-        ZStack(alignment: .topTrailing) {
-            ScrollView(.horizontal, showsIndicators: true) {
-                MobileMarkdownTableGrid(table: table, minColumnWidth: 104, maxColumnWidth: 360)
-                    .fixedSize(horizontal: true, vertical: true)
-            }
-            Button {
-                expandedTable = ExpandedMobileMarkdownTable(table: table)
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.caption.weight(.semibold))
-                    .padding(7)
-                    .background(.regularMaterial, in: Circle())
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Open table in full screen")
-            .padding(6)
-        }
+        MobileMarkdownTablePreview(table: table)
     }
 
     private func inlineMarkdownText(_ text: String) -> Text {
@@ -394,6 +374,35 @@ struct MobileMarkdownText: View {
         return withoutSpaces.allSatisfy { $0 == "-" }
             || withoutSpaces.allSatisfy { $0 == "*" }
             || withoutSpaces.allSatisfy { $0 == "_" }
+    }
+}
+
+private struct MobileMarkdownTablePreview: View {
+    let table: MobileMarkdownTable
+    @State private var expandedTable: ExpandedMobileMarkdownTable?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ScrollView(.horizontal, showsIndicators: true) {
+                MobileMarkdownTableGrid(table: table, minColumnWidth: 104, maxColumnWidth: 360)
+                    .fixedSize(horizontal: true, vertical: true)
+            }
+            Button {
+                expandedTable = ExpandedMobileMarkdownTable(table: table)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption.weight(.semibold))
+                    .padding(7)
+                    .background(.regularMaterial, in: Circle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Open table in full screen")
+            .padding(6)
+        }
+        .textSelection(.disabled)
+        .fullScreenCover(item: $expandedTable) { item in
+            MobileMarkdownTableExpandedView(table: item.table)
+        }
     }
 }
 
