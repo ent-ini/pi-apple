@@ -690,11 +690,25 @@ final class PiAppState: ObservableObject {
     }
 
     var cachedAvailableModels: [PiModelOption] {
-        availableModelsCache
+        Self.selectableModels(from: availableModelsCache)
+    }
+
+    private static func selectableModels(from models: [PiModelOption]) -> [PiModelOption] {
+        models
+            .filter { model in
+                let provider = model.provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return provider != "groq" && provider != "groq-api" && !model.id.lowercased().hasPrefix("groq/")
+            }
+            .sorted {
+                if $0.provider.localizedCaseInsensitiveCompare($1.provider) != .orderedSame {
+                    return $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending
+                }
+                return $0.modelID.localizedCaseInsensitiveCompare($1.modelID) == .orderedAscending
+            }
     }
 
     private func cacheAvailableModels(_ models: [PiModelOption], loadedAt: Date = Date()) {
-        availableModelsCache = models
+        availableModelsCache = Self.selectableModels(from: models)
         availableModelsCacheLoadedAt = loadedAt
         saveAvailableModelsCache()
     }

@@ -266,7 +266,11 @@ struct ChatSessionView: View {
     }
 
     private var groupedModels: [ModelGroup] {
-        Dictionary(grouping: session.availableModels, by: \.provider)
+        let selectableModels = session.availableModels.filter { model in
+            let provider = model.provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return provider != "groq" && provider != "groq-api" && !model.id.lowercased().hasPrefix("groq/")
+        }
+        return Dictionary(grouping: selectableModels, by: \.provider)
             .map { key, value in
                 ModelGroup(
                     provider: key,
