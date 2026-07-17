@@ -2030,6 +2030,7 @@ var (
 	attachmentOpeningTagPattern  = regexp.MustCompile(`<file\s+name="[^"]*"([^>]*)>`)
 	attachmentTagIDPattern       = regexp.MustCompile(`\battachment-id="(att_[a-f0-9]{32})"`)
 	attachmentTagNamePattern     = regexp.MustCompile(`\battachment-name="([^"]+)"`)
+	attachmentTagMIMEPattern     = regexp.MustCompile(`\battachment-mime="([^"]+)"`)
 )
 
 func normalizeOpaqueAttachmentTags(text string) (string, bool) {
@@ -2043,24 +2044,19 @@ func normalizeOpaqueAttachmentTags(text string) (string, bool) {
 		if nameMatch := attachmentTagNamePattern.FindStringSubmatch(tag); len(nameMatch) == 2 && strings.TrimSpace(nameMatch[1]) != "" {
 			name = nameMatch[1]
 		}
-		opaquePrefix := `<file name="pi-attachment://` + idMatch[1] + `/` + name + `"`
+		opaquePrefix := `<file name="pi-attachment://` + idMatch[1] + `/`
 		if strings.HasPrefix(tag, opaquePrefix) {
 			return tag
 		}
-		// Find the closing quote of the name value and retain all remaining
-		// metadata attributes byte-for-byte.
-		namePrefix := strings.Index(tag, `name="`)
-		if namePrefix < 0 {
-			return tag
+		mimeType := "application/octet-stream"
+		if mimeMatch := attachmentTagMIMEPattern.FindStringSubmatch(tag); len(mimeMatch) == 2 && strings.TrimSpace(mimeMatch[1]) != "" {
+			mimeType = mimeMatch[1]
 		}
-		valueStart := namePrefix + len(`name="`)
-		relativeEnd := strings.Index(tag[valueStart:], `"`)
-		if relativeEnd < 0 {
-			return tag
-		}
-		valueEnd := valueStart + relativeEnd
+		// Some legacy upload markers have a missing quote after `name`, which
+		// means retaining the original attribute suffix drops `attachment-id`.
+		// Rebuild a canonical opaque tag instead of splicing malformed bytes.
 		changed = true
-		return `<file name="pi-attachment://` + idMatch[1] + `/` + name + tag[valueEnd:]
+		return `<file name="pi-attachment://` + xmlEscape(idMatch[1]) + `/` + xmlEscape(name) + `" attachment-id="` + xmlEscape(idMatch[1]) + `" attachment-name="` + xmlEscape(name) + `" attachment-mime="` + xmlEscape(mimeType) + `">`
 	})
 	return replaced, changed
 }

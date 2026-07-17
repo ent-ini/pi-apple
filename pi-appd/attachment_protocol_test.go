@@ -93,6 +93,19 @@ func TestTransportEventHidesInternalAttachmentPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpaqueAttachmentTagsRepairsMalformedLegacyNameAttribute(t *testing.T) {
+	id := "att_0123456789abcdef0123456789abcdef"
+	input := `<file name="/tmp/pasted-image.png attachment-id="` + id + `" attachment-name="pasted-image.png" attachment-mime="image/png"></file>`
+	output, changed := normalizeOpaqueAttachmentTags(input)
+	if !changed {
+		t.Fatal("expected malformed attachment tag to be normalized")
+	}
+	want := `<file name="pi-attachment://` + id + `/pasted-image.png" attachment-id="` + id + `" attachment-name="pasted-image.png" attachment-mime="image/png">`
+	if output != want+`</file>` {
+		t.Fatalf("normalized tag = %q, want %q", output, want+`</file>`)
+	}
+}
+
 func TestPromptMarksIDWithoutReplacingToolPath(t *testing.T) {
 	store := newAttachmentTestStore(t)
 	record, err := store.Upload(context.Background(), strings.NewReader("hello"), "note.txt", "text/plain")

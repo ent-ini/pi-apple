@@ -391,9 +391,9 @@ private struct MacUserAttachmentView: View {
 
     @ViewBuilder
     private var imageContent: some View {
-        if let inlineImage {
+        if let resolvedInlineImage {
             Button(action: previewAttachment) {
-                Image(nsImage: inlineImage)
+                Image(nsImage: resolvedInlineImage)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: 240, maxHeight: 240)
@@ -438,6 +438,21 @@ private struct MacUserAttachmentView: View {
         return false
     }
 
+    private var resolvedInlineImage: NSImage? {
+        if let inlineImage { return inlineImage }
+        if let embeddedImageData {
+            return ChatImageCache.shared.image(for: "user-inline:\(attachment.id)") {
+                NSImage(data: embeddedImageData)
+            }
+        }
+        if let localImagePath {
+            return ChatImageCache.shared.image(for: "user-local:\(localImagePath)") {
+                NSImage(contentsOfFile: localImagePath)
+            }
+        }
+        return nil
+    }
+
     private var embeddedImageData: Data? {
         guard case .image(let path, _, _, _) = attachment.kind,
               path.hasPrefix("data:"),
@@ -472,12 +487,9 @@ private struct MacUserAttachmentView: View {
     @MainActor
     private func loadInlineImageIfNeeded() async {
         guard isImage, inlineImage == nil else { return }
-        if let embeddedImageData {
-            inlineImage = NSImage(data: embeddedImageData)
-            return
-        }
-        if let localImagePath {
-            inlineImage = NSImage(contentsOfFile: localImagePath)
+        if embeddedImageData != nil || localImagePath != nil {
+            // Embedded/local images are synchronously resolved and cached by
+            // `resolvedInlineImage`, so no asynchronous fetch is needed.
             return
         }
         guard attachment.attachmentID != nil else { return }
