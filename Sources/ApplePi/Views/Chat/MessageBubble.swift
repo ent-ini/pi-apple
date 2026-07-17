@@ -103,8 +103,26 @@ private struct UserMessagePresentation {
             if case .image(_, _, let attachmentID, _) = attachment.kind { return attachmentID != nil }
             return false
         }
+        let hasEmbeddedExplicitImage = explicitImages.contains { attachment in
+            if case .image(let path, _, _, _) = attachment.kind {
+                return path.hasPrefix("data:")
+            }
+            return false
+        }
+        let attachments: [UserVisibleAttachment]
+        if hasEmbeddedExplicitImage {
+            // pi-appd persists a send as both an inline base64 image and a
+            // `<file>` reference. The inline payload is immediately renderable,
+            // so prefer it and retain only non-image file attachments.
+            attachments = explicitImages + extractedAttachments.filter { attachment in
+                if case .image = attachment.kind { return false }
+                return true
+            }
+        } else {
+            attachments = (hasAuthoritativeImage ? [] : explicitImages) + extractedAttachments
+        }
         return UserMessagePresentation(
-            attachments: deduplicate((hasAuthoritativeImage ? [] : explicitImages) + extractedAttachments),
+            attachments: deduplicate(attachments),
             text: normalizeVisibleText(textFragments.joined(separator: "\n\n"))
         )
     }
@@ -403,6 +421,15 @@ private struct MacUserAttachmentView: View {
         return false
     }
 
+    private var embeddedImageData: Data? {
+        guard case .image(let path, _, _, _) = attachment.kind,
+              path.hasPrefix("data:"),
+              let comma = path.firstIndex(of: ",") else {
+            return nil
+        }
+        return Data(base64Encoded: String(path[path.index(after: comma)...]))
+    }
+
     private var localImagePath: String? {
         guard case .image(let path, _, let attachmentID, _) = attachment.kind,
               attachmentID == nil,
@@ -428,6 +455,10 @@ private struct MacUserAttachmentView: View {
     @MainActor
     private func loadInlineImageIfNeeded() async {
         guard isImage, inlineImage == nil else { return }
+        if let embeddedImageData {
+            inlineImage = NSImage(data: embeddedImageData)
+            return
+        }
         if let localImagePath {
             inlineImage = NSImage(contentsOfFile: localImagePath)
             return
