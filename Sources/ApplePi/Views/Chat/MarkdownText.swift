@@ -9,6 +9,7 @@ import ApplePiRemote
 /// quotes, GitHub-flavored pipe tables, horizontal rules, and fenced code blocks.
 struct MarkdownText: View {
     let text: String
+    @State private var expandedTable: ExpandedMarkdownTable?
 
     init(_ text: String) {
         self.text = text
@@ -32,6 +33,9 @@ struct MarkdownText: View {
                 }
             }
             .textSelection(.enabled)
+            .sheet(item: $expandedTable) { item in
+                MarkdownTableExpandedView(table: item.table)
+            }
         }
     }
 
@@ -111,68 +115,23 @@ struct MarkdownText: View {
     }
 
     private func tableView(_ table: MarkdownTable) -> some View {
-        let columnWidths = table.preferredColumnWidths(minWidth: 112, maxWidth: 760)
-
-        return ScrollView(.horizontal, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 0) {
-                tableRow(table.header, table: table, columnWidths: columnWidths, isHeader: true)
-
-                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
-                    tableRow(row, table: table, columnWidths: columnWidths, isHeader: false)
-                }
+        ZStack(alignment: .topTrailing) {
+            ScrollView(.horizontal, showsIndicators: true) {
+                MarkdownTableGrid(table: table, minColumnWidth: 112, maxColumnWidth: 760)
+                    .fixedSize(horizontal: true, vertical: true)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
-            )
-            .fixedSize(horizontal: true, vertical: true)
-        }
-    }
-
-    private func tableRow(_ cells: [String], table: MarkdownTable, columnWidths: [CGFloat], isHeader: Bool) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            ForEach(0..<table.columnCount, id: \.self) { column in
-                tableCell(
-                    cells[safe: column] ?? "",
-                    alignment: table.alignment(for: column),
-                    isHeader: isHeader,
-                    width: columnWidths[safe: column] ?? 112
-                )
+            Button {
+                expandedTable = ExpandedMarkdownTable(table: table)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption.weight(.semibold))
+                    .padding(7)
+                    .background(.regularMaterial, in: Circle())
             }
+            .buttonStyle(.borderless)
+            .help("Open table in a larger view")
+            .padding(6)
         }
-        .frame(minHeight: isHeader ? 38 : 40, alignment: .topLeading)
-        .background(isHeader ? Color.primary.opacity(0.055) : Color.clear)
-        .overlay(Rectangle().fill(Color.secondary.opacity(0.14)).frame(height: 1), alignment: .bottom)
-        .overlay(tableVerticalDividers(columnWidths: columnWidths))
-    }
-
-    private func tableVerticalDividers(columnWidths: [CGFloat]) -> some View {
-        GeometryReader { geometry in
-            Path { path in
-                var x: CGFloat = 0
-                for width in columnWidths.dropLast() {
-                    x += width
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
-                }
-            }
-            .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func tableCell(_ text: String, alignment: MarkdownTable.Alignment, isHeader: Bool, width: CGFloat) -> some View {
-        inlineMarkdownText(text.isEmpty ? " " : text)
-            .font(isHeader ? .body.weight(.semibold) : .body)
-            .lineSpacing(2)
-            .lineLimit(nil)
-            .multilineTextAlignment(alignment.textAlignment)
-            .frame(width: max(1, width - 24), alignment: alignment.frameAlignment)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(width: width, alignment: alignment.frameAlignment)
     }
 
     private func inlineMarkdownText(_ text: String) -> Text {
@@ -453,6 +412,113 @@ struct MarkdownText: View {
             || withoutSpaces.allSatisfy { $0 == "*" }
             || withoutSpaces.allSatisfy { $0 == "_" }
     }
+}
+
+private struct ExpandedMarkdownTable: Identifiable {
+    let id = UUID()
+    let table: MarkdownTable
+}
+
+private struct MarkdownTableExpandedView: View {
+    let table: MarkdownTable
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Table")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            Divider()
+            ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                MarkdownTableGrid(table: table, minColumnWidth: 140, maxColumnWidth: 1_200)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(20)
+            }
+        }
+        .frame(minWidth: 720, minHeight: 480, idealWidth: 960, idealHeight: 640)
+    }
+}
+
+private struct MarkdownTableGrid: View {
+    let table: MarkdownTable
+    let minColumnWidth: CGFloat
+    let maxColumnWidth: CGFloat
+
+    private var columnWidths: [CGFloat] {
+        table.preferredColumnWidths(minWidth: minColumnWidth, maxWidth: maxColumnWidth)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            tableRow(table.header, isHeader: true)
+            ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+                tableRow(row, isHeader: false)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
+        )
+    }
+
+    private func tableRow(_ cells: [String], isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(0..<table.columnCount, id: \.self) { column in
+                tableCell(
+                    cells[safe: column] ?? "",
+                    alignment: table.alignment(for: column),
+                    isHeader: isHeader,
+                    width: columnWidths[safe: column] ?? minColumnWidth
+                )
+            }
+        }
+        .frame(minHeight: isHeader ? 38 : 40, alignment: .topLeading)
+        .background(isHeader ? Color.primary.opacity(0.055) : Color.clear)
+        .overlay(Rectangle().fill(Color.secondary.opacity(0.14)).frame(height: 1), alignment: .bottom)
+        .overlay(tableVerticalDividers)
+    }
+
+    private var tableVerticalDividers: some View {
+        GeometryReader { geometry in
+            Path { path in
+                var x: CGFloat = 0
+                for width in columnWidths.dropLast() {
+                    x += width
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                }
+            }
+            .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func tableCell(_ text: String, alignment: MarkdownTable.Alignment, isHeader: Bool, width: CGFloat) -> some View {
+        markdownInlineText(text.isEmpty ? " " : text)
+            .font(isHeader ? .body.weight(.semibold) : .body)
+            .lineSpacing(2)
+            .lineLimit(nil)
+            .multilineTextAlignment(alignment.textAlignment)
+            .frame(width: max(1, width - 24), alignment: alignment.frameAlignment)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(width: width, alignment: alignment.frameAlignment)
+    }
+}
+
+private func markdownInlineText(_ text: String) -> Text {
+    if let attributed = MarkdownInlineCache.shared.attributedString(for: text) {
+        return Text(attributed)
+    }
+    return Text(text)
 }
 
 private final class MarkdownInlineCache: @unchecked Sendable {
