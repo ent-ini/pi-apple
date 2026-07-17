@@ -5,6 +5,9 @@ import ApplePiCore
 import ApplePiRemote
 
 private let messageBubbleMaxWidth: CGFloat = 420
+// A bubble must be wide enough for its HH:mm timestamp and horizontal inset.
+// This also prevents one-character messages from collapsing into a narrow pill.
+private let messageBubbleMinWidth: CGFloat = 72
 
 private struct BubbleWidthModifier: ViewModifier {
     let prefersCompactWidth: Bool
@@ -13,10 +16,11 @@ private struct BubbleWidthModifier: ViewModifier {
     func body(content: Content) -> some View {
         if prefersCompactWidth {
             content
+                .frame(minWidth: messageBubbleMinWidth, alignment: alignment)
                 .fixedSize(horizontal: true, vertical: false)
         } else {
             content
-                .frame(maxWidth: messageBubbleMaxWidth, alignment: alignment)
+                .frame(minWidth: messageBubbleMinWidth, maxWidth: messageBubbleMaxWidth, alignment: alignment)
         }
     }
 }
@@ -570,6 +574,9 @@ struct MessageBubble: View {
     private func timestampView(_ timestamp: String, compact: Bool) -> some View {
         Text(timestamp)
             .font(.caption2)
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(timestampColor)
             .padding(.horizontal, compact ? 6 : 0)
             .padding(.vertical, compact ? 3 : 0)

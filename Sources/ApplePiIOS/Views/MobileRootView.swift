@@ -1662,6 +1662,8 @@ private struct MobileEventRow: View {
     }
 }
 
+private let mobileMessageBubbleMinWidth: CGFloat = 72
+
 private struct MessageBubble: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: MobilePiAppState
@@ -1742,11 +1744,15 @@ private struct MessageBubble: View {
             if isLastVisibleBlock, let timestamp = formattedTime {
                 Text(timestamp)
                     .font(.caption2)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .foregroundStyle(timestampColor)
                     .padding(.trailing, 10)
                     .padding(.bottom, 7)
             }
         }
+        .frame(minWidth: mobileMessageBubbleMinWidth, alignment: bubbleFrameAlignment)
     }
 
     private var bubbleBackground: Color {
@@ -1776,6 +1782,10 @@ private struct MessageBubble: View {
     private var formattedTime: String? {
         guard let timestamp = message.timestamp else { return nil }
         return Self.timeFormatter.string(from: timestamp)
+    }
+
+    private var bubbleFrameAlignment: Alignment {
+        message.role == .user ? .trailing : .leading
     }
 
     private var visibleBlocks: [ContentBlock] {
