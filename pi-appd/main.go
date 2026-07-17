@@ -2079,6 +2079,7 @@ func (s *server) decorateOutboundAttachmentRecords(ctx context.Context, session 
 }
 
 func (s *server) decorateOutboundAttachmentRecord(ctx context.Context, session sessionRecord, raw string) string {
+	raw = normalizeOutboundThinkingRecord(raw)
 	var event map[string]any
 	if json.Unmarshal([]byte(raw), &event) != nil {
 		return raw

@@ -314,19 +314,27 @@ package enum SessionEventParser {
         }
         guard extractingThinkingTags else { return [.text(text)] }
 
-        let pattern = #"(?is)<(?:mm:)?think(?:ing)?\b[^>]*>(.*?)</(?:mm:)?think(?:ing)?\s*>"#
+        // A provider that serializes reasoning as XML emits it as the leading
+        // envelope of the text block. It may then append ordinary visible text
+        // after `</think>` (or a tool call in the next block). Split precisely
+        // that envelope, but never tags embedded in normal prose or code.
+        let pattern = #"(?is)^\s*<(?:mm:)?think(?:ing)?\b[^>]*>(.*?)</(?:mm:)?think(?:ing)?[\t\r\n ]*>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [.text(text)] }
         let fullTextRange = NSRange(text.startIndex..., in: text)
         guard let match = regex.firstMatch(in: text, range: fullTextRange),
-              match.range(at: 0) == fullTextRange,
+              let fullRange = Range(match.range(at: 0), in: text),
               let thinkingRange = Range(match.range(at: 1), in: text) else {
-            // A literal `<think>…</think>` in prose or inline code must stay
-            // visible text. Treat only a complete assistant payload wrapped
-            // in those tags as provider-emitted reasoning.
             return [.text(text)]
         }
         let thinking = String(text[thinkingRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return thinking.isEmpty ? [] : [.thinking(thinking, signature: nil)]
+        guard !thinking.isEmpty else { return [.text(text)] }
+
+        var blocks: [ContentBlock] = [.thinking(thinking, signature: nil)]
+        let visibleText = String(text[fullRange.upperBound...])
+        if !visibleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(.text(visibleText))
+        }
+        return blocks
     }
 
     /// Some Anthropic-compatible providers emit a proper `thinking` block and

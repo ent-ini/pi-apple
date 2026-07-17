@@ -865,21 +865,37 @@ private func isolatedDefaults() -> UserDefaults {
     }())
 }
 
-@Test func sessionEventParserConvertsOnlyWholeThinkPayloadIntoThinkingContent() {
+@Test func sessionEventParserSplitsLeadingThinkEnvelopeAndPreservesVisibleSuffix() {
     let events = SessionEventParser.parse(lines: [
-        #"{"type":"message","message":{"role":"assistant","content":"<think>Inspect the macOS app.</think>"}}"#,
-        #"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Literal `<think>example</think>` stays in prose."}]}}"#
+        #"{"type":"message","message":{"role":"assistant","content":"<think>Inspect the macOS app.</think>\n\nI found the issue."}}"#,
+        #"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Prose can mention `<think>example</think>` literally."}]}}"#
     ])
 
     #expect(events.count == 2)
     #expect({
         guard case .message(let message, _) = events[0] else { return false }
-        return message.content == [.thinking("Inspect the macOS app.", signature: nil)]
+        return message.content == [
+            .thinking("Inspect the macOS app.", signature: nil),
+            .text("\n\nI found the issue.")
+        ]
     }())
     #expect({
         guard case .message(let message, _) = events[1] else { return false }
-        return message.content == [.text("Literal `<think>example</think>` stays in prose.")]
+        return message.content == [.text("Prose can mention `<think>example</think>` literally.")]
     }())
+}
+
+@Test func sessionEventParserHidesLeadingThinkEnvelopeBeforeToolCalls() {
+    let events = SessionEventParser.parse(lines: [
+        #"{"type":"message","id":"assistant-1","message":{"role":"assistant","content":[{"type":"text","text":"<think>Reasoning can itself mention `<think>` as a literal tag.</think>\n\n"},{"type":"toolCall","id":"call-1","name":"bash","arguments":{}}]}}"#
+    ])
+
+    #expect(events.count == 2)
+    #expect({
+        guard case .message(let message, _) = events[0] else { return false }
+        return message.content == [.thinking("Reasoning can itself mention `<think>` as a literal tag.", signature: nil)]
+    }())
+    #expect({ if case .toolCall = events[1] { return true }; return false }())
 }
 
 @Test func sessionEventParserHidesStandaloneMiniMaxPunctuationBetweenThinkingAndToolCall() {
