@@ -441,7 +441,7 @@ private struct MarkdownTableExpandedView: View {
                     .padding(20)
             }
         }
-        .frame(minWidth: 720, minHeight: 480, idealWidth: 960, idealHeight: 640)
+        .frame(minWidth: 720, idealWidth: 960, minHeight: 480, idealHeight: 640)
     }
 }
 
