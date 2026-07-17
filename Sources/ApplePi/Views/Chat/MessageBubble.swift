@@ -145,11 +145,12 @@ private struct UserMessagePresentation {
         for match in matches.reversed() {
             guard let fullRange = Range(match.range(at: 0), in: cleaned) else { continue }
 
+            let rawTag = String(cleaned[fullRange])
             let path = substring(in: cleaned, nsRange: match.range(at: 1)).map(xmlUnescape) ?? ""
             let attributes = substring(in: cleaned, nsRange: match.range(at: 2)) ?? ""
             let body = substring(in: cleaned, nsRange: match.range(at: 3)).map(xmlUnescape) ?? ""
 
-            if let attachment = makeAttachment(path: path, attributes: attributes, body: body, includeImageTags: includeImageTags) {
+            if let attachment = makeAttachment(path: path, attributes: attributes, rawTag: rawTag, body: body, includeImageTags: includeImageTags) {
                 attachments.append(attachment)
             }
 
@@ -163,13 +164,22 @@ private struct UserMessagePresentation {
         )
     }
 
-    private static func makeAttachment(path: String, attributes: String, body: String, includeImageTags: Bool) -> UserVisibleAttachment? {
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func makeAttachment(path: String, attributes: String, rawTag: String, body: String, includeImageTags: Bool) -> UserVisibleAttachment? {
+        // Some pi clients serialize an upload as `name="/path attachment-id="id"…`
+        // (the closing quote after the path is absent). Keep accepting that
+        // historical wire shape: recover attributes from the complete tag and
+        // strip the leaked attribute marker from the filesystem path.
+        let trimmedPath = path
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+attachment-id=$"#, with: "", options: .regularExpression)
         guard !trimmedPath.isEmpty else { return nil }
-        let attachmentID = attribute("attachment-id", in: attributes)
-        let mime = attribute("attachment-mime", in: attributes) ?? guessImageMimeType(from: trimmedPath)
+        let attachmentID = attribute("attachment-id", in: attributes) ?? attribute("attachment-id", in: rawTag)
+        let mime = attribute("attachment-mime", in: attributes)
+            ?? attribute("attachment-mime", in: rawTag)
+            ?? guessImageMimeType(from: trimmedPath)
         let pathName = URL(fileURLWithPath: trimmedPath).lastPathComponent
         let displayName = attribute("attachment-name", in: attributes)
+            ?? attribute("attachment-name", in: rawTag)
             ?? (pathName.isEmpty ? "Attachment" : pathName)
         let isImage = mime?.lowercased().hasPrefix("image/") == true || isImageAttachment(path: trimmedPath, body: body)
         if isImage {
