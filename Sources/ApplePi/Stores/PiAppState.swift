@@ -1083,7 +1083,12 @@ final class PiAppState: ObservableObject {
             do {
                 daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments, host: remoteAPIHost)
                 await MainActor.run {
-                    session?.replaceSteeringAttachments(operationID: operationID, prompt: taggedPrompt, attachments: daemonAttachments)
+                    session?.replaceSteeringAttachments(
+                        operationID: operationID,
+                        prompt: taggedPrompt,
+                        attachments: daemonAttachments,
+                        sourceAttachments: attachments
+                    )
                     attachments.forEach { try? FileManager.default.removeItem(at: $0.fileURL) }
                 }
             } catch {
@@ -1326,7 +1331,12 @@ final class PiAppState: ObservableObject {
         do {
             daemonAttachments = try await self.uploadAttachmentsIfNeeded(attachments, host: remoteAPIHost)
             await MainActor.run {
-                session?.replaceOptimisticAttachments(operationID: operationID, prompt: prompt, attachments: daemonAttachments)
+                session?.replaceOptimisticAttachments(
+                    operationID: operationID,
+                    prompt: prompt,
+                    attachments: daemonAttachments,
+                    sourceAttachments: attachments
+                )
                 attachments.forEach { try? FileManager.default.removeItem(at: $0.fileURL) }
             }
         } catch {

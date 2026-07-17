@@ -174,6 +174,50 @@ private actor IntBox {
 }
 
 @MainActor
+@Test func chatSessionKeepsUploadedOptimisticImageAsInlineData() throws {
+    let fileURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ApplePiTests-\(UUID().uuidString).png")
+    let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+    try imageData.write(to: fileURL)
+    defer { try? FileManager.default.removeItem(at: fileURL) }
+
+    let attachment = ChatAttachment(
+        kind: .image,
+        fileURL: fileURL,
+        displayName: "photo.png",
+        mimeType: "image/png"
+    )
+    let operationID = UUID()
+    let session = ChatSession(key: "test", title: "Test")
+    session.beginSending(prompt: "inspect", attachments: [attachment], operationID: operationID)
+    session.replaceOptimisticAttachments(
+        operationID: operationID,
+        prompt: "inspect",
+        attachments: [
+            UploadedAttachmentReference(
+                id: "att_photo",
+                fileName: "photo.png",
+                mimeType: "image/png",
+                size: Int64(imageData.count)
+            )
+        ],
+        sourceAttachments: [attachment]
+    )
+
+    let optimisticImage = session.events.compactMap { event -> String? in
+        guard case .message(let message, _) = event,
+              message.id == "optimistic-user-\(operationID.uuidString.lowercased())" else {
+            return nil
+        }
+        return message.content.compactMap { block in
+            if case .image(let path, _) = block { return path }
+            return nil
+        }.first
+    }.first
+    #expect(optimisticImage == "data:image/png;base64,\(imageData.base64EncodedString())")
+}
+
+@MainActor
 @Test func chatSessionReconcilesFilePromptWhenPersistedFileIsExpanded() {
     let session = ChatSession(key: "test", title: "Test")
     let attachment = ChatAttachment(

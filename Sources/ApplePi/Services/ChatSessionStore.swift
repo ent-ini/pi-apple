@@ -270,11 +270,16 @@ final class ChatSession: ObservableObject, Identifiable {
         rebuildEvents()
     }
 
-    func replaceOptimisticAttachments(operationID: UUID, prompt: String, attachments: [UploadedAttachmentReference]) {
+    func replaceOptimisticAttachments(
+        operationID: UUID,
+        prompt: String,
+        attachments: [UploadedAttachmentReference],
+        sourceAttachments: [ChatAttachment] = []
+    ) {
         let messageID = "optimistic-user-\(operationID.uuidString.lowercased())"
         guard case .message(let existing, let lineIndex)? = transientUserEvent,
               existing.id == messageID else { return }
-        var content = attachments.map(Self.optimisticContentBlock)
+        var content = Self.optimisticContentBlocks(attachments, sourceAttachments: sourceAttachments)
         if !prompt.isEmpty { content.append(.text(prompt)) }
         transientUserEvent = .message(
             Message(id: messageID, role: .user, content: content, model: nil, timestamp: existing.timestamp, parentId: nil),
@@ -295,9 +300,31 @@ final class ChatSession: ObservableObject, Identifiable {
         rebuildEvents()
     }
 
-    private static func optimisticContentBlock(_ attachment: UploadedAttachmentReference) -> ContentBlock {
+    private static func optimisticContentBlocks(
+        _ attachments: [UploadedAttachmentReference],
+        sourceAttachments: [ChatAttachment]
+    ) -> [ContentBlock] {
+        attachments.enumerated().map { index, attachment in
+            let source = sourceAttachments.indices.contains(index) ? sourceAttachments[index] : nil
+            return optimisticContentBlock(attachment, source: source)
+        }
+    }
+
+    private static func optimisticContentBlock(
+        _ attachment: UploadedAttachmentReference,
+        source: ChatAttachment?
+    ) -> ContentBlock {
         let name = attachment.fileName.xmlEscapedForPrompt
-        let mime = attachment.mimeType ?? "application/octet-stream"
+        let mime = attachment.mimeType ?? source?.mimeType ?? "application/octet-stream"
+        if mime.lowercased().hasPrefix("image/"),
+           source?.kind == .image,
+           let sourceURL = source?.fileURL,
+           let data = try? Data(contentsOf: sourceURL) {
+            // Uploading succeeds before pi-appd has persisted/decorated the
+            // turn. Keep an inline snapshot in the optimistic row so the
+            // staged file can be deleted without a visible photo gap.
+            return .image(path: "data:\(mime);base64,\(data.base64EncodedString())", mime: mime)
+        }
         guard let id = attachment.id?.nilIfBlank else { return .text("[File attached: \(name)]") }
         let reference = "pi-attachment://\(id)/\(name)"
         if mime.lowercased().hasPrefix("image/") { return .image(path: reference, mime: mime) }
@@ -405,13 +432,18 @@ final class ChatSession: ObservableObject, Identifiable {
         rebuildEvents()
     }
 
-    func replaceSteeringAttachments(operationID: UUID, prompt: String, attachments: [UploadedAttachmentReference]) {
+    func replaceSteeringAttachments(
+        operationID: UUID,
+        prompt: String,
+        attachments: [UploadedAttachmentReference],
+        sourceAttachments: [ChatAttachment] = []
+    ) {
         let messageID = "optimistic-user-\(operationID.uuidString.lowercased())"
         guard let index = transientStreamEvents.firstIndex(where: { event in
             if case .message(let message, _) = event { return message.id == messageID }
             return false
         }), case .message(let existing, let lineIndex) = transientStreamEvents[index] else { return }
-        var content = attachments.map(Self.optimisticContentBlock)
+        var content = Self.optimisticContentBlocks(attachments, sourceAttachments: sourceAttachments)
         if !prompt.isEmpty { content.append(.text(prompt)) }
         transientStreamEvents[index] = .message(
             Message(id: messageID, role: .user, content: content, model: nil, timestamp: existing.timestamp, parentId: nil),

@@ -143,7 +143,7 @@ struct SessionEventParserToolResultTests {
             #"{"type":"message","id":"result-event","message":{"role":"toolResult","toolCallId":"live-subagent","toolName":"subagent","content":"done","details":{"results":[{"messages":[{"role":"assistant","content":"completed"}]}]}}}"#
         ]
         let parsed = SessionEventParser.parse(lines: lines)
-        let transientEvents = parsed.map { event in
+        let transientEvents: [SessionEvent] = parsed.map { event in
             switch event {
             case .toolCall(let call, _):
                 .toolCall(call, lineIndex: Int.max - 1)
