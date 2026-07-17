@@ -379,36 +379,32 @@ struct MobileMarkdownText: View {
 
 private struct MobileMarkdownTablePreview: View {
     let table: MobileMarkdownTable
-    @State private var expandedTable: ExpandedMobileMarkdownTable?
+    @State private var isExpanded = false
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            ScrollView(.horizontal, showsIndicators: true) {
-                MobileMarkdownTableGrid(table: table, minColumnWidth: 104, maxColumnWidth: 360)
-                    .fixedSize(horizontal: true, vertical: true)
-            }
+        ScrollView(.horizontal, showsIndicators: true) {
+            MobileMarkdownTableGrid(table: table, minColumnWidth: 104, maxColumnWidth: 360)
+                .fixedSize(horizontal: true, vertical: true)
+        }
+        .overlay(alignment: .topTrailing) {
             Button {
-                expandedTable = ExpandedMobileMarkdownTable(table: table)
+                isExpanded = true
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.caption.weight(.semibold))
-                    .padding(7)
+                    .padding(8)
                     .background(.regularMaterial, in: Circle())
+                    .contentShape(Circle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .accessibilityLabel("Open table in full screen")
             .padding(6)
         }
         .textSelection(.disabled)
-        .fullScreenCover(item: $expandedTable) { item in
-            MobileMarkdownTableExpandedView(table: item.table)
+        .fullScreenCover(isPresented: $isExpanded) {
+            MobileMarkdownTableExpandedView(table: table)
         }
     }
-}
-
-private struct ExpandedMobileMarkdownTable: Identifiable {
-    let id = UUID()
-    let table: MobileMarkdownTable
 }
 
 private struct MobileMarkdownTableExpandedView: View {

@@ -396,38 +396,34 @@ struct MarkdownText: View {
 
 private struct MarkdownTablePreview: View {
     let table: MarkdownTable
-    @State private var expandedTable: ExpandedMarkdownTable?
+    @State private var isExpanded = false
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            ScrollView(.horizontal, showsIndicators: true) {
-                MarkdownTableGrid(table: table, minColumnWidth: 112, maxColumnWidth: 760)
-                    .fixedSize(horizontal: true, vertical: true)
-            }
+        ScrollView(.horizontal, showsIndicators: true) {
+            MarkdownTableGrid(table: table, minColumnWidth: 112, maxColumnWidth: 760)
+                .fixedSize(horizontal: true, vertical: true)
+        }
+        .overlay(alignment: .topTrailing) {
             Button {
-                expandedTable = ExpandedMarkdownTable(table: table)
+                isExpanded = true
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.caption.weight(.semibold))
-                    .padding(7)
+                    .padding(8)
                     .background(.regularMaterial, in: Circle())
+                    .contentShape(Circle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("Open table in a larger view")
             .padding(6)
         }
         // The parent message supports drag-to-select text. Disable that mode
         // for the interactive table control so its button receives clicks.
         .textSelection(.disabled)
-        .sheet(item: $expandedTable) { item in
-            MarkdownTableExpandedView(table: item.table)
+        .sheet(isPresented: $isExpanded) {
+            MarkdownTableExpandedView(table: table)
         }
     }
-}
-
-private struct ExpandedMarkdownTable: Identifiable {
-    let id = UUID()
-    let table: MarkdownTable
 }
 
 private struct MarkdownTableExpandedView: View {
