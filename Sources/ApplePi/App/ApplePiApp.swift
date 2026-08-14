@@ -11,9 +11,10 @@ struct ApplePiApp: App {
 
     var body: some Scene {
         WindowGroup("pi-app", id: "main") {
-            ContentView()
+            ContentView(presentation: .standard)
                 .environmentObject(appState)
                 .frame(minWidth: 260, minHeight: 180)
+                .background(FloatingChatWindowLauncher(appDelegate: appDelegate))
                 .onAppear {
                     appDelegate.configure(appState: appState)
                 }
@@ -23,6 +24,15 @@ struct ApplePiApp: App {
         }
         .commands {
             ApplePiCommands(appState: appState)
+        }
+
+        Window(FloatingChatWindow.title, id: FloatingChatWindow.id) {
+            ContentView(presentation: .floatingOverlay)
+                .environmentObject(appState)
+                .frame(minWidth: 520, minHeight: 420)
+                .onAppear {
+                    appDelegate.prepareFloatingChatWindow()
+                }
         }
 
         Settings {
@@ -41,12 +51,55 @@ struct ApplePiApp: App {
     }
 }
 
+enum FloatingChatWindow {
+    static let id = "floating-chat"
+    static let title = "Pi Chat"
+}
+
+private struct FloatingChatWindowLauncher: View {
+    let appDelegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear {
+                appDelegate.configureFloatingChatLauncher(openWindow: openWindow)
+            }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private weak var appState: PiAppState?
     private var shortcutsObserver: NSObjectProtocol?
     private var floatingChatObserver: NSObjectProtocol?
-    private var globalHotKeyObserver: NSObjectProtocol?
     private var overlayController: GlobalChatOverlayController?
+    @MainActor private var openFloatingChatWindow: OpenWindowAction?
+
+    @MainActor
+    func configureFloatingChatLauncher(openWindow: OpenWindowAction) {
+        openFloatingChatWindow = openWindow
+    }
+
+    @MainActor
+    func toggleFloatingChat() {
+        let overlayController = overlayController ?? GlobalChatOverlayController()
+        self.overlayController = overlayController
+        if overlayController.isFloatingChatVisible {
+            overlayController.hideFloatingChat()
+            return
+        }
+        guard let openFloatingChatWindow else { return }
+        openFloatingChatWindow(id: FloatingChatWindow.id)
+        DispatchQueue.main.async {
+            overlayController.presentFloatingChat()
+        }
+    }
+
+    @MainActor
+    func prepareFloatingChatWindow() {
+        overlayController?.prepareFloatingChatWindowIfAvailable()
+    }
 
     deinit {
         if let shortcutsObserver {
@@ -54,9 +107,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         if let floatingChatObserver {
             NotificationCenter.default.removeObserver(floatingChatObserver)
-        }
-        if let globalHotKeyObserver {
-            NotificationCenter.default.removeObserver(globalHotKeyObserver)
         }
     }
 
@@ -67,9 +117,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         self.overlayController = overlayController
         installShortcutObserverIfNeeded()
         refreshGlobalOverlayShortcut()
-        DispatchQueue.main.async {
-            overlayController.prepareChatWindowIfAvailable()
-        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -98,16 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.overlayController?.toggle()
-            }
-        }
-        globalHotKeyObserver = NotificationCenter.default.addObserver(
-            forName: .piAppGlobalChatHotKeyPressed,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.overlayController?.toggle()
+                self?.toggleFloatingChat()
             }
         }
     }

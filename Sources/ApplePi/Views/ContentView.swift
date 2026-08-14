@@ -3,13 +3,18 @@ import SwiftUI
 import ApplePiCore
 import ApplePiRemote
 
+enum ChatWindowPresentation {
+    case standard
+    case floatingOverlay
+}
+
 struct ContentView: View {
+    let presentation: ChatWindowPresentation
+
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: PiAppState
-    // The floating chat opens directly into the conversation. Session history
-    // is a drawer that overlays the chat when the toolbar button is pressed.
-    // A new key deliberately avoids restoring the old side-by-side layout.
-    @AppStorage("ApplePi.showsSessionOverlay") private var wantsSessionList = false
+    @AppStorage("ApplePi.showsSessionList") private var wantsStandardSessionList = true
+    @AppStorage("ApplePi.showsSessionOverlay") private var wantsOverlaySessionList = false
     @AppStorage("ApplePi.sessionListWidth") private var storedSessionListWidth = PaneLayout.sessionListDefault
     @AppStorage("ApplePi.showsUtilitySidebar") private var wantsUtilitySidebar = false
     @AppStorage("ApplePi.utilitySidebarWidth") private var storedUtilitySidebarWidth = PaneLayout.utilitySidebarDefault
@@ -23,11 +28,18 @@ struct ContentView: View {
             let utilitySidebarWidth = liveUtilitySidebarWidth ?? storedUtilitySidebarWidth
             let paneVisibility = AdaptivePaneVisibility(
                 windowWidth: proxy.size.width,
+                presentation: presentation,
+                wantsSessionList: wantsSessionList,
                 wantsUtilitySidebar: wantsUtilitySidebar
             )
 
             ZStack(alignment: .leading) {
                 HStack(spacing: 0) {
+                    if paneVisibility.showsStandardSessionList {
+                        sessionListPanel(width: sessionListWidth, topInset: proxy.safeAreaInsets.top)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
+
                     DetailView()
                         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
 
@@ -61,33 +73,9 @@ struct ContentView: View {
                     }
                 }
 
-                if wantsSessionList {
+                if presentation == .floatingOverlay && wantsSessionList {
                     HStack(spacing: 0) {
-                        SessionListView()
-                            .frame(width: PaneLayout.clampedSessionListWidth(sessionListWidth))
-                        PaneResizeHandle(
-                            topInset: proxy.safeAreaInsets.top,
-                            onDragStart: {
-                                activeResize = ActivePaneResize(kind: .sessionList, startingWidth: sessionListWidth)
-                            },
-                            onDrag: { translation in
-                                let startWidth = activeResize?.startingWidth ?? sessionListWidth
-                                let nextWidth = PaneLayout.clampedSessionListWidth(startWidth + translation)
-                                withTransaction(Transaction(animation: nil)) {
-                                    liveSessionListWidth = Double(nextWidth)
-                                }
-                            },
-                            onDragEnd: {
-                                let finalWidth = liveSessionListWidth ?? sessionListWidth
-                                storedSessionListWidth = finalWidth
-                                activeResize = nil
-                                if finalWidth <= PaneLayout.sessionListCollapseThreshold {
-                                    withAnimation(.snappy(duration: 0.18)) {
-                                        wantsSessionList = false
-                                    }
-                                }
-                            }
-                        )
+                        sessionListPanel(width: sessionListWidth, topInset: proxy.safeAreaInsets.top)
                         Spacer(minLength: 0)
                     }
                     .transition(.move(edge: .leading).combined(with: .opacity))
@@ -184,6 +172,50 @@ struct ContentView: View {
             NewSessionSheet()
                 .environmentObject(appState)
         }
+    }
+
+    private var wantsSessionList: Bool {
+        get {
+            switch presentation {
+            case .standard: wantsStandardSessionList
+            case .floatingOverlay: wantsOverlaySessionList
+            }
+        }
+        nonmutating set {
+            switch presentation {
+            case .standard: wantsStandardSessionList = newValue
+            case .floatingOverlay: wantsOverlaySessionList = newValue
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sessionListPanel(width: Double, topInset: CGFloat) -> some View {
+        SessionListView()
+            .frame(width: PaneLayout.clampedSessionListWidth(width))
+        PaneResizeHandle(
+            topInset: topInset,
+            onDragStart: {
+                activeResize = ActivePaneResize(kind: .sessionList, startingWidth: width)
+            },
+            onDrag: { translation in
+                let startWidth = activeResize?.startingWidth ?? width
+                let nextWidth = PaneLayout.clampedSessionListWidth(startWidth + translation)
+                withTransaction(Transaction(animation: nil)) {
+                    liveSessionListWidth = Double(nextWidth)
+                }
+            },
+            onDragEnd: {
+                let finalWidth = liveSessionListWidth ?? width
+                storedSessionListWidth = finalWidth
+                activeResize = nil
+                if finalWidth <= PaneLayout.sessionListCollapseThreshold {
+                    withAnimation(.snappy(duration: 0.18)) {
+                        wantsSessionList = false
+                    }
+                }
+            }
+        )
     }
 
     private func toggleSessionList() {
@@ -310,13 +342,25 @@ private struct PaneResizeHandle: View {
 }
 
 private struct AdaptivePaneVisibility: Equatable {
+    let showsStandardSessionList: Bool
     let showsUtilitySidebar: Bool
 
-    init(windowWidth: CGFloat, wantsUtilitySidebar: Bool) {
+    init(
+        windowWidth: CGFloat,
+        presentation: ChatWindowPresentation,
+        wantsSessionList: Bool,
+        wantsUtilitySidebar: Bool
+    ) {
         let minimumDetailWidth: CGFloat = 320
-        let minimumUtilityWidth: CGFloat = CGFloat(PaneLayout.utilitySidebarMinimum)
+        let minimumSessionWidth = CGFloat(PaneLayout.sessionListMinimum)
+        let minimumUtilityWidth = CGFloat(PaneLayout.utilitySidebarMinimum)
         let resizeHandleWidth = PaneLayout.resizeHandleWidth
-        showsUtilitySidebar = wantsUtilitySidebar && windowWidth >= minimumDetailWidth + minimumUtilityWidth + resizeHandleWidth
+        showsStandardSessionList = presentation == .standard
+            && wantsSessionList
+            && windowWidth >= minimumDetailWidth + minimumSessionWidth + resizeHandleWidth
+        let sessionWidth = showsStandardSessionList ? minimumSessionWidth + resizeHandleWidth : 0
+        showsUtilitySidebar = wantsUtilitySidebar
+            && windowWidth >= minimumDetailWidth + sessionWidth + minimumUtilityWidth + resizeHandleWidth
     }
 }
 

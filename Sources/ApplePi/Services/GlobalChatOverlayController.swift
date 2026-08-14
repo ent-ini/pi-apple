@@ -1,17 +1,17 @@
 import AppKit
 import Carbon.HIToolbox
 
-/// Registers one system-wide hot key and turns the existing SwiftUI chat window
-/// into a floating palette. Carbon hot keys work outside the app without an
-/// Accessibility/Input Monitoring permission prompt.
+/// Owns the system-wide hot key and the dedicated floating-chat window. The
+/// normal WindowGroup is intentionally never changed: opening pi-app from the
+/// Dock remains a conventional macOS app window.
 @MainActor
-final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
+final class GlobalChatOverlayController: NSObject {
     private static let hotKeySignature: OSType = 0x50494150 // "PIAP"
     private static let hotKeyIdentifier: UInt32 = 1
 
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
-    private weak var chatWindow: NSWindow?
+    private weak var floatingChatWindow: NSWindow?
     private var hasPositionedWindow = false
 
     override init() {
@@ -19,8 +19,8 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
         installEventHandler()
     }
 
-    /// Replaces the current registration. The caller should display the
-    /// returned text in Settings so a system/application conflict is visible.
+    /// Replaces the current registration. The caller displays the returned
+    /// string in Settings so a system/application conflict is visible.
     func register(_ shortcut: AppShortcut) -> String {
         unregisterHotKey()
         guard let keyCode = shortcut.globalVirtualKeyCode else {
@@ -45,13 +45,30 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
         return "Active everywhere: \(shortcut.displayString) toggles the floating chat."
     }
 
-    func prepareChatWindowIfAvailable() {
-        guard let window = locateChatWindow() else { return }
+    func prepareFloatingChatWindowIfAvailable() {
+        guard let window = locateFloatingChatWindow() else { return }
         configure(window)
     }
 
-    func toggle() {
-        toggleChatWindow()
+    var isFloatingChatVisible: Bool {
+        guard let window = locateFloatingChatWindow() else { return false }
+        return window.isVisible && !window.isMiniaturized
+    }
+
+    func hideFloatingChat() {
+        locateFloatingChatWindow()?.orderOut(nil)
+    }
+
+    func presentFloatingChat() {
+        guard let window = locateFloatingChatWindow() else { return }
+        configure(window)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        positionOnFirstPresentation(window)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     private func installEventHandler() {
@@ -79,50 +96,29 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func toggleChatWindow() {
-        guard let window = locateChatWindow() else { return }
-        configure(window)
-
-        if window.isVisible && !window.isMiniaturized {
-            window.orderOut(nil)
-            return
-        }
-
-        if window.isMiniaturized {
-            window.deminiaturize(nil)
-        }
-        positionOnFirstPresentation(window)
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-    }
-
-    private func locateChatWindow() -> NSWindow? {
-        if let chatWindow { return chatWindow }
+    private func locateFloatingChatWindow() -> NSWindow? {
+        if let floatingChatWindow { return floatingChatWindow }
         guard let window = NSApp.windows.first(where: {
-            $0.title == "pi-app" && $0.contentView != nil
+            $0.title == FloatingChatWindow.title && $0.contentView != nil
         }) else {
             return nil
         }
-        chatWindow = window
+        floatingChatWindow = window
         return window
     }
 
     private func configure(_ window: NSWindow) {
-        // statusBar is above regular and floating windows from other apps.
-        // It gives this palette the Raycast-style "always on top" behavior.
+        // statusBar sits above normal/floating windows from other apps, giving
+        // this dedicated palette its Raycast-style always-on-top behavior.
         window.level = .statusBar
         window.hidesOnDeactivate = false
+
         // AppKit rejects canJoinAllSpaces together with moveToActiveSpace.
-        // SwiftUI may set the latter on a WindowGroup, so replace it before
-        // committing the collection behavior instead of simply unioning flags.
+        // SwiftUI may set the latter on a Window scene, so replace it first.
         var behavior = window.collectionBehavior
         behavior.remove(.moveToActiveSpace)
         behavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
         window.collectionBehavior = behavior
-        if window.delegate == nil {
-            window.delegate = self
-        }
     }
 
     private func positionOnFirstPresentation(_ window: NSWindow) {
@@ -143,13 +139,6 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
         window.setFrame(frame, display: true, animate: false)
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Keep the SwiftUI WindowGroup alive: the global hot key can bring the
-        // palette back even after the user clicks the red close button.
-        sender.orderOut(nil)
-        return false
-    }
-
     private static let hotKeyEventHandler: EventHandlerUPP = { _, event, _ in
         guard let event else { return OSStatus(eventNotHandledErr) }
         var receivedID = EventHotKeyID()
@@ -168,10 +157,9 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
             return OSStatus(eventNotHandledErr)
         }
 
-        // Do not bridge the Carbon callback directly to a @MainActor object:
-        // Swift 6 can trap on an executor assumption here. NotificationCenter
-        // hands the action to the app delegate, which safely hops to MainActor.
-        NotificationCenter.default.post(name: .piAppGlobalChatHotKeyPressed, object: nil)
+        // Keep the Carbon callback data-only; SwiftUI's launcher below safely
+        // performs the UI work on MainActor.
+        NotificationCenter.default.post(name: .piAppToggleFloatingChat, object: nil)
         return noErr
     }
 }

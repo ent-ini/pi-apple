@@ -9,7 +9,6 @@ typealias PiCatalogLoader = @Sendable (PiHostConfiguration, String?) async throw
 extension Notification.Name {
     static let piAppShortcutsDidChange = Notification.Name("PiApp.shortcutsDidChange")
     static let piAppToggleFloatingChat = Notification.Name("PiApp.toggleFloatingChat")
-    static let piAppGlobalChatHotKeyPressed = Notification.Name("PiApp.globalChatHotKeyPressed")
 }
 
 private final class MainActorCallback: @unchecked Sendable {
