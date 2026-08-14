@@ -38,6 +38,9 @@ struct ApplePiApp: App {
                 .onAppear {
                     appDelegate.prepareFloatingChatWindow()
                 }
+                .onDisappear {
+                    appDelegate.floatingChatWindowClosed()
+                }
         }
 
         Settings {
@@ -95,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return
         }
         guard let openFloatingChatWindow else { return }
+        overlayController.beginFloatingChatPresentation()
         openFloatingChatWindow(id: FloatingChatWindow.id)
         DispatchQueue.main.async {
             overlayController.presentFloatingChat()
@@ -104,6 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @MainActor
     func prepareFloatingChatWindow() {
         overlayController?.prepareFloatingChatWindowIfAvailable()
+    }
+
+    @MainActor
+    func floatingChatWindowClosed() {
+        overlayController?.floatingChatWindowClosed()
     }
 
     deinit {

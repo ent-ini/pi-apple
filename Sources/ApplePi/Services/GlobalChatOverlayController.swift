@@ -13,6 +13,7 @@ final class GlobalChatOverlayController: NSObject {
     private var eventHandlerRef: EventHandlerRef?
     private weak var floatingChatWindow: NSWindow?
     private var hasPositionedWindow = false
+    private var activationPolicyBeforeFloatingChat: NSApplication.ActivationPolicy?
 
     override init() {
         super.init()
@@ -57,6 +58,22 @@ final class GlobalChatOverlayController: NSObject {
 
     func hideFloatingChat() {
         locateFloatingChatWindow()?.orderOut(nil)
+        restoreRegularApplicationMode()
+    }
+
+    func floatingChatWindowClosed() {
+        restoreRegularApplicationMode()
+    }
+
+    func beginFloatingChatPresentation() {
+        // A regular foreground app cannot put a window over another app's
+        // full-screen Space. Switch only while the palette is visible; the
+        // normal pi-app window remains a regular Dock/window-menu app.
+        guard activationPolicyBeforeFloatingChat == nil else { return }
+        let currentPolicy = NSApp.activationPolicy()
+        guard currentPolicy == .regular,
+              NSApp.setActivationPolicy(.accessory) else { return }
+        activationPolicyBeforeFloatingChat = currentPolicy
     }
 
     func presentFloatingChat() {
@@ -66,7 +83,9 @@ final class GlobalChatOverlayController: NSObject {
             window.deminiaturize(nil)
         }
         positionOnFirstPresentation(window)
-        NSApp.activate(ignoringOtherApps: true)
+        // Do not activate the regular app here: that moves a full-screen
+        // browser away from its Space. An accessory palette can become key
+        // while the browser remains visually full screen underneath it.
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
     }
@@ -108,17 +127,32 @@ final class GlobalChatOverlayController: NSObject {
     }
 
     private func configure(_ window: NSWindow) {
-        // statusBar sits above normal/floating windows from other apps, giving
-        // this dedicated palette its Raycast-style always-on-top behavior.
-        window.level = .statusBar
+        // screenSaver is the level macOS composites over a different app's
+        // full-screen Space; statusBar still sits below that shield.
+        window.level = .screenSaver
         window.hidesOnDeactivate = false
 
         // AppKit rejects canJoinAllSpaces together with moveToActiveSpace.
-        // SwiftUI may set the latter on a Window scene, so replace it first.
+        // On macOS 15+ canJoinAllApplications is the full-screen/Stage
+        // Manager counterpart of canJoinAllSpaces and must not be combined
+        // with fullScreenAuxiliary.
         var behavior = window.collectionBehavior
         behavior.remove(.moveToActiveSpace)
-        behavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+        behavior.remove(.fullScreenPrimary)
+        behavior.remove(.fullScreenAuxiliary)
+        behavior.formUnion([.canJoinAllSpaces, .stationary])
+        if #available(macOS 15.0, *) {
+            behavior.formUnion(.canJoinAllApplications)
+        } else {
+            behavior.formUnion(.fullScreenAuxiliary)
+        }
         window.collectionBehavior = behavior
+    }
+
+    private func restoreRegularApplicationMode() {
+        guard let activationPolicyBeforeFloatingChat else { return }
+        _ = NSApp.setActivationPolicy(activationPolicyBeforeFloatingChat)
+        self.activationPolicyBeforeFloatingChat = nil
     }
 
     private func positionOnFirstPresentation(_ window: NSWindow) {
