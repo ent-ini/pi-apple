@@ -1099,6 +1099,7 @@ private func isolatedDefaults() -> UserDefaults {
 @Test func shortcutPreferencesUseDefaultsAndSwapConflicts() {
     var preferences = AppShortcutPreferences()
 
+    #expect(preferences.binding(for: .toggleChatOverlay).displayString == "⌥Space")
     #expect(preferences.binding(for: .newSession).displayString == "⌘N")
     #expect(preferences.binding(for: .findSessions).displayString == "⌘F")
 
@@ -1110,6 +1111,15 @@ private func isolatedDefaults() -> UserDefaults {
     preferences.set(AppShortcutAction.newSession.defaultShortcut, for: .newSession)
 
     #expect(preferences.binding(for: .newSession).displayString == "⌘N")
+}
+
+@Test func globalShortcutUsesCapturedKeyCodeAndLegacyFallback() {
+    let captured = AppShortcut(key: .character("ф"), modifiers: [.command, .option], capturedKeyCode: 0)
+    #expect(captured.globalVirtualKeyCode == 0)
+    #expect(captured.carbonModifiers == (1 << 8) | (1 << 11))
+
+    let legacy = AppShortcut(key: .character("n"), modifiers: .command)
+    #expect(legacy.globalVirtualKeyCode == 45)
 }
 
 @MainActor

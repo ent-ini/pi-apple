@@ -6,6 +6,11 @@ import ApplePiRemote
 
 typealias PiCatalogLoader = @Sendable (PiHostConfiguration, String?) async throws -> PiCatalogSnapshot
 
+extension Notification.Name {
+    static let piAppShortcutsDidChange = Notification.Name("PiApp.shortcutsDidChange")
+    static let piAppToggleFloatingChat = Notification.Name("PiApp.toggleFloatingChat")
+}
+
 private final class MainActorCallback: @unchecked Sendable {
     private let action: @MainActor () -> Void
 
@@ -84,6 +89,7 @@ final class PiAppState: ObservableObject {
             saveShortcutPreferences()
         }
     }
+    @Published private(set) var globalOverlayShortcutStatus = "Global shortcut is being prepared…"
     @Published private(set) var availableUpdate: AvailableUpdate?
     @Published private(set) var sendingSessionKeys: Set<String> = []
     @Published private(set) var unreadSessionKeys: Set<String> = []
@@ -578,6 +584,15 @@ final class PiAppState: ObservableObject {
         var next = shortcutPreferences
         next.set(shortcut, for: action)
         shortcutPreferences = next
+        NotificationCenter.default.post(name: .piAppShortcutsDidChange, object: self)
+    }
+
+    func setGlobalOverlayShortcutStatus(_ status: String) {
+        globalOverlayShortcutStatus = status
+    }
+
+    func toggleFloatingChatRequest() {
+        NotificationCenter.default.post(name: .piAppToggleFloatingChat, object: self)
     }
 
     func requestSessionSearchFocus() {

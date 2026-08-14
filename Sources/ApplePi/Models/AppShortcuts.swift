@@ -4,6 +4,7 @@ import ApplePiCore
 import ApplePiRemote
 
 enum AppShortcutAction: String, Codable, CaseIterable, Identifiable, Sendable {
+    case toggleChatOverlay
     case newSession
     case newTemporarySession
     case newSessionInFolder
@@ -14,6 +15,7 @@ enum AppShortcutAction: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .toggleChatOverlay: "Toggle floating chat"
         case .newSession: "New Session"
         case .newTemporarySession: "New Temporary Session"
         case .newSessionInFolder: "New Session in Folder"
@@ -24,6 +26,8 @@ enum AppShortcutAction: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var defaultShortcut: AppShortcut {
         switch self {
+        case .toggleChatOverlay:
+            AppShortcut(key: .special(.space), modifiers: .option)
         case .newSession:
             AppShortcut(key: .character("n"), modifiers: .command)
         case .newTemporarySession:
@@ -65,10 +69,15 @@ struct AppShortcutPreferences: Codable, Equatable, Sendable {
 struct AppShortcut: Codable, Equatable, Hashable, Sendable {
     var key: ShortcutKey
     var modifiers: ShortcutModifiers
+    /// The physical macOS virtual key code captured from NSEvent. Keeping it
+    /// makes global shortcuts layout-independent; older saved bindings fall
+    /// back to the US-layout mapping below.
+    var capturedKeyCode: UInt16?
 
-    init(key: ShortcutKey, modifiers: ShortcutModifiers) {
+    init(key: ShortcutKey, modifiers: ShortcutModifiers, capturedKeyCode: UInt16? = nil) {
         self.key = key
         self.modifiers = modifiers
+        self.capturedKeyCode = capturedKeyCode
     }
 
     init?(capturing event: NSEvent) {
@@ -76,7 +85,7 @@ struct AppShortcut: Codable, Equatable, Hashable, Sendable {
         guard !modifiers.isEmpty else { return nil }
 
         if let specialKey = SpecialShortcutKey(event: event) {
-            self.init(key: .special(specialKey), modifiers: modifiers)
+            self.init(key: .special(specialKey), modifiers: modifiers, capturedKeyCode: event.keyCode)
             return
         }
 
@@ -85,7 +94,7 @@ struct AppShortcut: Codable, Equatable, Hashable, Sendable {
             return nil
         }
 
-        self.init(key: .character(keyCharacter), modifiers: modifiers)
+        self.init(key: .character(keyCharacter), modifiers: modifiers, capturedKeyCode: event.keyCode)
     }
 
     var keyEquivalent: KeyEquivalent {
@@ -98,6 +107,31 @@ struct AppShortcut: Codable, Equatable, Hashable, Sendable {
 
     var displayString: String {
         modifiers.displayString + key.displayString
+    }
+
+    /// Values accepted by Carbon's RegisterEventHotKey. The modifier values
+    /// are deliberately kept here instead of exposing Carbon to SwiftUI.
+    var carbonModifiers: UInt32 {
+        var value: UInt32 = 0
+        if modifiers.contains(.command) { value |= 1 << 8 }
+        if modifiers.contains(.shift) { value |= 1 << 9 }
+        if modifiers.contains(.option) { value |= 1 << 11 }
+        if modifiers.contains(.control) { value |= 1 << 12 }
+        return value
+    }
+
+    var globalVirtualKeyCode: UInt32? {
+        if let capturedKeyCode { return UInt32(capturedKeyCode) }
+        return key.globalVirtualKeyCode
+    }
+
+    static func == (lhs: AppShortcut, rhs: AppShortcut) -> Bool {
+        lhs.modifiers == rhs.modifiers && lhs.globalVirtualKeyCode == rhs.globalVirtualKeyCode
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(modifiers)
+        hasher.combine(globalVirtualKeyCode)
     }
 }
 
@@ -126,6 +160,23 @@ enum ShortcutKey: Codable, Equatable, Hashable, Sendable {
             value.uppercased()
         case .special(let value):
             value.displayString
+        }
+    }
+
+    /// Fallback for bindings saved before we started persisting NSEvent's
+    /// virtual key code. New recordings always use their captured key code.
+    var globalVirtualKeyCode: UInt32? {
+        switch self {
+        case .special(let value): return value.globalVirtualKeyCode
+        case .character(let value):
+            let keyCodes: [String: UInt32] = [
+                "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+                "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20,
+                "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29, "]": 30,
+                "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37, "j": 38, "'": 39, "k": 40, ";": 41,
+                "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, "`": 50
+            ]
+            return keyCodes[value.lowercased()]
         }
     }
 }
@@ -181,6 +232,16 @@ enum SpecialShortcutKey: String, Codable, CaseIterable, Hashable, Sendable {
             "Space"
         case .tab:
             "⇥"
+        }
+    }
+
+    var globalVirtualKeyCode: UInt32 {
+        switch self {
+        case .returnKey: 36
+        case .delete: 51
+        case .escape: 53
+        case .space: 49
+        case .tab: 48
         }
     }
 }

@@ -14,6 +14,9 @@ struct ApplePiApp: App {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 260, minHeight: 180)
+                .onAppear {
+                    appDelegate.configure(appState: appState)
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     appState.shutdownForTermination()
                 }
@@ -39,12 +42,68 @@ struct ApplePiApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    private weak var appState: PiAppState?
+    private var shortcutsObserver: NSObjectProtocol?
+    private var floatingChatObserver: NSObjectProtocol?
+    private var overlayController: GlobalChatOverlayController?
+
+    deinit {
+        if let shortcutsObserver {
+            NotificationCenter.default.removeObserver(shortcutsObserver)
+        }
+        if let floatingChatObserver {
+            NotificationCenter.default.removeObserver(floatingChatObserver)
+        }
+    }
+
+    @MainActor
+    func configure(appState: PiAppState) {
+        self.appState = appState
+        let overlayController = overlayController ?? GlobalChatOverlayController()
+        self.overlayController = overlayController
+        installShortcutObserverIfNeeded()
+        refreshGlobalOverlayShortcut()
+        DispatchQueue.main.async {
+            overlayController.prepareChatWindowIfAvailable()
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
         let notificationCenter = UNUserNotificationCenter.current()
         notificationCenter.delegate = self
+    }
+
+    @MainActor
+    private func installShortcutObserverIfNeeded() {
+        guard shortcutsObserver == nil else { return }
+        shortcutsObserver = NotificationCenter.default.addObserver(
+            forName: .piAppShortcutsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshGlobalOverlayShortcut()
+            }
+        }
+        floatingChatObserver = NotificationCenter.default.addObserver(
+            forName: .piAppToggleFloatingChat,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.overlayController?.toggle()
+            }
+        }
+    }
+
+    @MainActor
+    private func refreshGlobalOverlayShortcut() {
+        guard let appState, let overlayController else { return }
+        let status = overlayController.register(appState.shortcut(for: .toggleChatOverlay))
+        appState.setGlobalOverlayShortcutStatus(status)
     }
 
     func userNotificationCenter(
@@ -90,6 +149,15 @@ struct ApplePiCommands: Commands {
         }
 
         CommandMenu("Pi") {
+            Button("Toggle Floating Chat") {
+                // The actual key binding is registered through Carbon so it
+                // works from every application; this menu item is a visible
+                // in-app alternative and intentionally has no menu shortcut.
+                appState.toggleFloatingChatRequest()
+            }
+
+            Divider()
+
             Button("New Session") {
                 appState.openNewSessionInCurrentFolder()
             }

@@ -380,11 +380,16 @@ struct SettingsView: View {
                     ShortcutRecorderField(shortcut: shortcutBinding(action))
                         .frame(width: 160, height: 28)
                 }
+                if action == .toggleChatOverlay {
+                    Text(appState.globalOverlayShortcutStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         } header: {
             Text("Shortcuts")
         } footer: {
-            Text("Click a shortcut, then press a new key combination. Esc cancels. If the combo is already used, shortcuts swap places.")
+            Text("The floating-chat shortcut works from any app and keeps pi-app above other windows until you press it again. Other shortcuts work while pi-app is active. Click a shortcut, then press a new key combination. Esc cancels. If the combo is already used, shortcuts swap places.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
