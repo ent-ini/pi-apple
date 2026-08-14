@@ -110,7 +110,13 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
     private func configure(_ window: NSWindow) {
         window.level = .floating
         window.hidesOnDeactivate = false
-        window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace])
+        // AppKit rejects canJoinAllSpaces together with moveToActiveSpace.
+        // SwiftUI may set the latter on a WindowGroup, so replace it before
+        // committing the collection behavior instead of simply unioning flags.
+        var behavior = window.collectionBehavior
+        behavior.remove(.moveToActiveSpace)
+        behavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+        window.collectionBehavior = behavior
         if window.delegate == nil {
             window.delegate = self
         }
