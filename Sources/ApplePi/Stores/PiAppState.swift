@@ -679,6 +679,18 @@ final class PiAppState: ObservableObject {
         }
     }
 
+    /// Used by the floating palette after its catalog finishes loading. It
+    /// restores that palette's own tab first; otherwise it opens the most
+    /// recently active remote session, falling back to a ready-to-type chat.
+    func openMostRecentSessionOrNewIfNeeded() {
+        guard chatWorkspace.tabs.isEmpty, !isLoadingCatalog else { return }
+        if let mostRecent = filteredSessions().first {
+            select(.session(mostRecent.id))
+        } else {
+            openNewSessionInCurrentFolder()
+        }
+    }
+
     func select(_ selection: PiSelection) {
         self.selection = selection
         if case .session = selection, let selectedSession {

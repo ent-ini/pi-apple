@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var liveSessionListWidth: Double?
     @State private var liveUtilitySidebarWidth: Double?
     @State private var activeResize: ActivePaneResize?
+    @State private var hasResolvedInitialFloatingChat = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -90,6 +91,10 @@ struct ContentView: View {
         .onAppear {
             liveSessionListWidth = storedSessionListWidth
             liveUtilitySidebarWidth = storedUtilitySidebarWidth
+            resolveInitialFloatingChatIfNeeded()
+        }
+        .onChange(of: appState.isLoadingCatalog) { _, _ in
+            resolveInitialFloatingChatIfNeeded()
         }
         .onChange(of: storedSessionListWidth) { _, newValue in
             guard activeResize?.kind != .sessionList else { return }
@@ -172,6 +177,14 @@ struct ContentView: View {
             NewSessionSheet()
                 .environmentObject(appState)
         }
+    }
+
+    private func resolveInitialFloatingChatIfNeeded() {
+        guard presentation == .floatingOverlay,
+              !hasResolvedInitialFloatingChat,
+              !appState.isLoadingCatalog else { return }
+        hasResolvedInitialFloatingChat = true
+        appState.openMostRecentSessionOrNewIfNeeded()
     }
 
     private var wantsSessionList: Bool {
