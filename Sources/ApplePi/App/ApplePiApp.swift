@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private weak var appState: PiAppState?
     private var shortcutsObserver: NSObjectProtocol?
     private var floatingChatObserver: NSObjectProtocol?
+    private var globalHotKeyObserver: NSObjectProtocol?
     private var overlayController: GlobalChatOverlayController?
 
     deinit {
@@ -53,6 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         if let floatingChatObserver {
             NotificationCenter.default.removeObserver(floatingChatObserver)
+        }
+        if let globalHotKeyObserver {
+            NotificationCenter.default.removeObserver(globalHotKeyObserver)
         }
     }
 
@@ -90,6 +94,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         floatingChatObserver = NotificationCenter.default.addObserver(
             forName: .piAppToggleFloatingChat,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.overlayController?.toggle()
+            }
+        }
+        globalHotKeyObserver = NotificationCenter.default.addObserver(
+            forName: .piAppGlobalChatHotKeyPressed,
             object: nil,
             queue: .main
         ) { [weak self] _ in

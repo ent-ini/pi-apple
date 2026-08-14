@@ -1,10 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
 
-private struct HotKeyHandlerContext: @unchecked Sendable {
-    let pointer: UnsafeMutableRawPointer
-}
-
 /// Registers one system-wide hot key and turns the existing SwiftUI chat window
 /// into a floating palette. Carbon hot keys work outside the app without an
 /// Accessibility/Input Monitoring permission prompt.
@@ -68,7 +64,7 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
             Self.hotKeyEventHandler,
             1,
             &eventType,
-            Unmanaged.passUnretained(self).toOpaque(),
+            nil,
             &eventHandlerRef
         )
         if status != noErr {
@@ -81,10 +77,6 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
         }
-    }
-
-    private func handleHotKeyPress() {
-        toggleChatWindow()
     }
 
     private func toggleChatWindow() {
@@ -149,8 +141,8 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
         return false
     }
 
-    private static let hotKeyEventHandler: EventHandlerUPP = { _, event, userData in
-        guard let event, let userData else { return OSStatus(eventNotHandledErr) }
+    private static let hotKeyEventHandler: EventHandlerUPP = { _, event, _ in
+        guard let event else { return OSStatus(eventNotHandledErr) }
         var receivedID = EventHotKeyID()
         let status = GetEventParameter(
             event,
@@ -167,14 +159,10 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
             return OSStatus(eventNotHandledErr)
         }
 
-        // Carbon invokes an application event handler on the app's main event
-        // loop. Avoid spawning a task here: that would make the actor-owned
-        // controller cross a Sendable boundary in Swift 6.
-        let context = HotKeyHandlerContext(pointer: userData)
-        return MainActor.assumeIsolated {
-            let controller = Unmanaged<GlobalChatOverlayController>.fromOpaque(context.pointer).takeUnretainedValue()
-            controller.handleHotKeyPress()
-            return noErr
-        }
+        // Do not bridge the Carbon callback directly to a @MainActor object:
+        // Swift 6 can trap on an executor assumption here. NotificationCenter
+        // hands the action to the app delegate, which safely hops to MainActor.
+        NotificationCenter.default.post(name: .piAppGlobalChatHotKeyPressed, object: nil)
+        return noErr
     }
 }
