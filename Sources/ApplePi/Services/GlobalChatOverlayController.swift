@@ -94,6 +94,7 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
         positionOnFirstPresentation(window)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     private func locateChatWindow() -> NSWindow? {
@@ -108,7 +109,9 @@ final class GlobalChatOverlayController: NSObject, NSWindowDelegate {
     }
 
     private func configure(_ window: NSWindow) {
-        window.level = .floating
+        // statusBar is above regular and floating windows from other apps.
+        // It gives this palette the Raycast-style "always on top" behavior.
+        window.level = .statusBar
         window.hidesOnDeactivate = false
         // AppKit rejects canJoinAllSpaces together with moveToActiveSpace.
         // SwiftUI may set the latter on a WindowGroup, so replace it before

@@ -6,7 +6,10 @@ import ApplePiRemote
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appState: PiAppState
-    @AppStorage("ApplePi.showsSessionList") private var wantsSessionList = true
+    // The floating chat opens directly into the conversation. Session history
+    // is a drawer that overlays the chat when the toolbar button is pressed.
+    // A new key deliberately avoids restoring the old side-by-side layout.
+    @AppStorage("ApplePi.showsSessionOverlay") private var wantsSessionList = false
     @AppStorage("ApplePi.sessionListWidth") private var storedSessionListWidth = PaneLayout.sessionListDefault
     @AppStorage("ApplePi.showsUtilitySidebar") private var wantsUtilitySidebar = false
     @AppStorage("ApplePi.utilitySidebarWidth") private var storedUtilitySidebarWidth = PaneLayout.utilitySidebarDefault
@@ -20,73 +23,79 @@ struct ContentView: View {
             let utilitySidebarWidth = liveUtilitySidebarWidth ?? storedUtilitySidebarWidth
             let paneVisibility = AdaptivePaneVisibility(
                 windowWidth: proxy.size.width,
-                wantsSessionList: wantsSessionList,
                 wantsUtilitySidebar: wantsUtilitySidebar
             )
 
-            HStack(spacing: 0) {
-                if paneVisibility.showsSessionList {
-                    SessionListView()
-                        .frame(width: PaneLayout.clampedSessionListWidth(sessionListWidth))
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                    PaneResizeHandle(
-                        topInset: proxy.safeAreaInsets.top,
-                        onDragStart: {
-                            activeResize = ActivePaneResize(kind: .sessionList, startingWidth: sessionListWidth)
-                        },
-                        onDrag: { translation in
-                            let startWidth = activeResize?.startingWidth ?? sessionListWidth
-                            let nextWidth = PaneLayout.clampedSessionListWidth(startWidth + translation)
-                            withTransaction(Transaction(animation: nil)) {
-                                liveSessionListWidth = Double(nextWidth)
-                            }
-                        },
-                        onDragEnd: {
-                            let finalWidth = liveSessionListWidth ?? sessionListWidth
-                            storedSessionListWidth = finalWidth
-                            activeResize = nil
-                            if finalWidth <= PaneLayout.sessionListCollapseThreshold {
-                                withAnimation(.snappy(duration: 0.18)) {
-                                    wantsSessionList = false
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
+                    DetailView()
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+
+                    if paneVisibility.showsUtilitySidebar {
+                        PaneResizeHandle(
+                            topInset: proxy.safeAreaInsets.top,
+                            onDragStart: {
+                                activeResize = ActivePaneResize(kind: .utilitySidebar, startingWidth: utilitySidebarWidth)
+                            },
+                            onDrag: { translation in
+                                let startWidth = activeResize?.startingWidth ?? utilitySidebarWidth
+                                let nextWidth = PaneLayout.clampedUtilitySidebarWidth(startWidth - translation)
+                                withTransaction(Transaction(animation: nil)) {
+                                    liveUtilitySidebarWidth = Double(nextWidth)
+                                }
+                            },
+                            onDragEnd: {
+                                let finalWidth = liveUtilitySidebarWidth ?? utilitySidebarWidth
+                                storedUtilitySidebarWidth = finalWidth
+                                activeResize = nil
+                                if finalWidth <= PaneLayout.utilitySidebarCollapseThreshold {
+                                    withAnimation(.snappy(duration: 0.18)) {
+                                        wantsUtilitySidebar = false
+                                    }
                                 }
                             }
-                        }
-                    )
+                        )
+                        UtilitySidebarView()
+                            .frame(width: PaneLayout.clampedUtilitySidebarWidth(utilitySidebarWidth))
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
                 }
 
-                DetailView()
-                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-
-                if paneVisibility.showsUtilitySidebar {
-                    PaneResizeHandle(
-                        topInset: proxy.safeAreaInsets.top,
-                        onDragStart: {
-                            activeResize = ActivePaneResize(kind: .utilitySidebar, startingWidth: utilitySidebarWidth)
-                        },
-                        onDrag: { translation in
-                            let startWidth = activeResize?.startingWidth ?? utilitySidebarWidth
-                            let nextWidth = PaneLayout.clampedUtilitySidebarWidth(startWidth - translation)
-                            withTransaction(Transaction(animation: nil)) {
-                                liveUtilitySidebarWidth = Double(nextWidth)
-                            }
-                        },
-                        onDragEnd: {
-                            let finalWidth = liveUtilitySidebarWidth ?? utilitySidebarWidth
-                            storedUtilitySidebarWidth = finalWidth
-                            activeResize = nil
-                            if finalWidth <= PaneLayout.utilitySidebarCollapseThreshold {
-                                withAnimation(.snappy(duration: 0.18)) {
-                                    wantsUtilitySidebar = false
+                if wantsSessionList {
+                    HStack(spacing: 0) {
+                        SessionListView()
+                            .frame(width: PaneLayout.clampedSessionListWidth(sessionListWidth))
+                        PaneResizeHandle(
+                            topInset: proxy.safeAreaInsets.top,
+                            onDragStart: {
+                                activeResize = ActivePaneResize(kind: .sessionList, startingWidth: sessionListWidth)
+                            },
+                            onDrag: { translation in
+                                let startWidth = activeResize?.startingWidth ?? sessionListWidth
+                                let nextWidth = PaneLayout.clampedSessionListWidth(startWidth + translation)
+                                withTransaction(Transaction(animation: nil)) {
+                                    liveSessionListWidth = Double(nextWidth)
+                                }
+                            },
+                            onDragEnd: {
+                                let finalWidth = liveSessionListWidth ?? sessionListWidth
+                                storedSessionListWidth = finalWidth
+                                activeResize = nil
+                                if finalWidth <= PaneLayout.sessionListCollapseThreshold {
+                                    withAnimation(.snappy(duration: 0.18)) {
+                                        wantsSessionList = false
+                                    }
                                 }
                             }
-                        }
-                    )
-                    UtilitySidebarView()
-                        .frame(width: PaneLayout.clampedUtilitySidebarWidth(utilitySidebarWidth))
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        )
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                    .zIndex(1)
                 }
             }
             .animation(.snappy(duration: 0.18), value: paneVisibility)
+            .animation(.snappy(duration: 0.18), value: wantsSessionList)
         }
         .foregroundStyle(appState.appearance.textColor(for: appState.appearance.resolvedColorScheme(current: colorScheme)))
         .background(AppBackdrop(appearance: appState.appearance))
@@ -301,17 +310,13 @@ private struct PaneResizeHandle: View {
 }
 
 private struct AdaptivePaneVisibility: Equatable {
-    let showsSessionList: Bool
     let showsUtilitySidebar: Bool
 
-    init(windowWidth: CGFloat, wantsSessionList: Bool, wantsUtilitySidebar: Bool) {
+    init(windowWidth: CGFloat, wantsUtilitySidebar: Bool) {
         let minimumDetailWidth: CGFloat = 320
-        let minimumSessionWidth: CGFloat = CGFloat(PaneLayout.sessionListMinimum)
         let minimumUtilityWidth: CGFloat = CGFloat(PaneLayout.utilitySidebarMinimum)
         let resizeHandleWidth = PaneLayout.resizeHandleWidth
-        showsSessionList = wantsSessionList && windowWidth >= minimumDetailWidth + minimumSessionWidth + resizeHandleWidth
-        let occupiedBySession = showsSessionList ? minimumSessionWidth + resizeHandleWidth : 0
-        showsUtilitySidebar = wantsUtilitySidebar && windowWidth >= minimumDetailWidth + occupiedBySession + minimumUtilityWidth + resizeHandleWidth
+        showsUtilitySidebar = wantsUtilitySidebar && windowWidth >= minimumDetailWidth + minimumUtilityWidth + resizeHandleWidth
     }
 }
 
