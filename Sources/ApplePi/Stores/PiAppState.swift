@@ -108,7 +108,7 @@ final class PiAppState: ObservableObject {
     private let hostDefaultsKey = "ApplePi.host"
     private let appearanceDefaultsKey = "ApplePi.appearance"
     private let shortcutDefaultsKey = "ApplePi.shortcuts"
-    private let chatTabDefaultsKey = "ApplePi.chatTabs"
+    private let chatTabDefaultsKey: String
     private let lastUpdateCheckKey = "ApplePi.updateCheck.lastCheckedAt"
     private let modelDefaultsKey = "ApplePi.modelDefaults"
     private let availableModelsCacheDefaultsKey = "ApplePi.availableModelsCache"
@@ -170,9 +170,11 @@ final class PiAppState: ObservableObject {
                 activeProjectDirectory: activeProjectDirectory
             )
         },
-        startsBackgroundWork: Bool = true
+        startsBackgroundWork: Bool = true,
+        chatTabsDefaultsKey: String = "ApplePi.chatTabs"
     ) {
         self.defaults = defaults
+        self.chatTabDefaultsKey = chatTabsDefaultsKey
         self.updateCheckService = updateCheckService
         self.remoteDirectoryService = remoteDirectoryService
         self.catalogLoader = catalogLoader
@@ -234,7 +236,9 @@ final class PiAppState: ObservableObject {
     }
 
     private func migrateLegacyDefaultsIfNeeded() {
-        guard defaults === UserDefaults.standard else { return }
+        // Only the normal application window inherits the legacy tab snapshot.
+        // The floating palette has its own independent workspace and drafts.
+        guard chatTabDefaultsKey == "ApplePi.chatTabs", defaults === UserDefaults.standard else { return }
         let migrationMarker = "pi-app.defaultsMigration.com.dodoreach.ApplePi"
         guard !defaults.bool(forKey: migrationMarker) else { return }
         guard let legacyDomain = UserDefaults.standard.persistentDomain(forName: "com.dodoreach.ApplePi") else {

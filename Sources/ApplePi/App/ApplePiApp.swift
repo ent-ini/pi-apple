@@ -8,6 +8,10 @@ import ApplePiRemote
 struct ApplePiApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appState = PiAppState()
+    // The floating palette intentionally owns a separate tab/workspace store:
+    // selection, transcript scroll position and unsent composer drafts must
+    // never leak into the ordinary application window.
+    @StateObject private var overlayAppState = PiAppState(chatTabsDefaultsKey: "ApplePi.overlayChatTabs")
 
     var body: some Scene {
         WindowGroup("pi-app", id: "main") {
@@ -20,6 +24,7 @@ struct ApplePiApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     appState.shutdownForTermination()
+                    overlayAppState.shutdownForTermination()
                 }
         }
         .commands {
@@ -28,7 +33,7 @@ struct ApplePiApp: App {
 
         Window(FloatingChatWindow.title, id: FloatingChatWindow.id) {
             ContentView(presentation: .floatingOverlay)
-                .environmentObject(appState)
+                .environmentObject(overlayAppState)
                 .frame(minWidth: 520, minHeight: 420)
                 .onAppear {
                     appDelegate.prepareFloatingChatWindow()
