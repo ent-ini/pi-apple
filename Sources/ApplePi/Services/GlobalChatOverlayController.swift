@@ -1,27 +1,39 @@
 import AppKit
 import Carbon.HIToolbox
+import SwiftUI
 
-/// Owns the system-wide hot key and the dedicated floating-chat window. The
-/// normal WindowGroup is intentionally never changed: opening pi-app from the
-/// Dock remains a conventional macOS app window.
+private final class FloatingChatPanel: NSPanel {
+    var onDismiss: (() -> Void)?
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func performClose(_ sender: Any?) {
+        orderOut(sender)
+        onDismiss?()
+    }
+}
+
+/// Owns the system-wide hot key and a real non-activating AppKit panel. A
+/// SwiftUI Window cannot be reliably placed over another app's full-screen
+/// Space; this panel can, while the ordinary pi-app window stays conventional.
 @MainActor
 final class GlobalChatOverlayController: NSObject {
     private static let hotKeySignature: OSType = 0x50494150 // "PIAP"
     private static let hotKeyIdentifier: UInt32 = 1
 
+    private let overlayAppState: PiAppState
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
-    private weak var floatingChatWindow: NSWindow?
-    private var hasPositionedWindow = false
+    private var panel: FloatingChatPanel?
     private var activationPolicyBeforeFloatingChat: NSApplication.ActivationPolicy?
 
-    override init() {
+    init(overlayAppState: PiAppState) {
+        self.overlayAppState = overlayAppState
         super.init()
         installEventHandler()
     }
 
-    /// Replaces the current registration. The caller displays the returned
-    /// string in Settings so a system/application conflict is visible.
     func register(_ shortcut: AppShortcut) -> String {
         unregisterHotKey()
         guard let keyCode = shortcut.globalVirtualKeyCode else {
@@ -46,29 +58,62 @@ final class GlobalChatOverlayController: NSObject {
         return "Active everywhere: \(shortcut.displayString) toggles the floating chat."
     }
 
-    func prepareFloatingChatWindowIfAvailable() {
-        guard let window = locateFloatingChatWindow() else { return }
-        configure(window)
+    var isFloatingChatVisible: Bool {
+        guard let panel else { return false }
+        return panel.isVisible && !panel.isMiniaturized
     }
 
-    var isFloatingChatVisible: Bool {
-        guard let window = locateFloatingChatWindow() else { return false }
-        return window.isVisible && !window.isMiniaturized
+    func toggleFloatingChat() {
+        if isFloatingChatVisible {
+            hideFloatingChat()
+        } else {
+            presentFloatingChat()
+        }
     }
 
     func hideFloatingChat() {
-        locateFloatingChatWindow()?.orderOut(nil)
+        panel?.orderOut(nil)
         restoreRegularApplicationMode()
     }
 
-    func floatingChatWindowClosed() {
-        restoreRegularApplicationMode()
+    private func presentFloatingChat() {
+        beginFloatingChatPresentation()
+        let panel = panel ?? createPanel()
+        configure(panel)
+        position(panel)
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
     }
 
-    func beginFloatingChatPresentation() {
-        // A regular foreground app cannot put a window over another app's
-        // full-screen Space. Switch only while the palette is visible; the
-        // normal pi-app window remains a regular Dock/window-menu app.
+    private func createPanel() -> FloatingChatPanel {
+        let rootView = ContentView(presentation: .floatingOverlay)
+            .environmentObject(overlayAppState)
+            .frame(minWidth: 520, minHeight: 420)
+        let hostingController = NSHostingController(rootView: rootView)
+        // macOS 14+ bridges the existing SwiftUI .toolbar declaration into
+        // the AppKit panel, so the floating chat keeps the full top bar.
+        hostingController.sceneBridgingOptions = [.toolbars, .title]
+
+        let panel = FloatingChatPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 900),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Pi Chat"
+        panel.contentViewController = hostingController
+        panel.isReleasedWhenClosed = false
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.animationBehavior = .utilityWindow
+        panel.onDismiss = { [weak self] in
+            self?.restoreRegularApplicationMode()
+        }
+        self.panel = panel
+        return panel
+    }
+
+    private func beginFloatingChatPresentation() {
         guard activationPolicyBeforeFloatingChat == nil else { return }
         let currentPolicy = NSApp.activationPolicy()
         guard currentPolicy == .regular,
@@ -76,18 +121,48 @@ final class GlobalChatOverlayController: NSObject {
         activationPolicyBeforeFloatingChat = currentPolicy
     }
 
-    func presentFloatingChat() {
-        guard let window = locateFloatingChatWindow() else { return }
-        configure(window)
-        if window.isMiniaturized {
-            window.deminiaturize(nil)
+    private func restoreRegularApplicationMode() {
+        guard let activationPolicyBeforeFloatingChat else { return }
+        _ = NSApp.setActivationPolicy(activationPolicyBeforeFloatingChat)
+        self.activationPolicyBeforeFloatingChat = nil
+    }
+
+    private func configure(_ panel: FloatingChatPanel) {
+        panel.level = .screenSaver
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = floatingCollectionBehavior
+    }
+
+    private var floatingCollectionBehavior: NSWindow.CollectionBehavior {
+        var behavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .stationary]
+        if #available(macOS 15.0, *) {
+            // Apple's full-screen/Stage Manager overlay flag. It is mutually
+            // exclusive with the auxiliary/primary family of flags.
+            behavior.insert(.canJoinAllApplications)
+        } else {
+            behavior.insert(.fullScreenAuxiliary)
         }
-        positionOnFirstPresentation(window)
-        // Do not activate the regular app here: that moves a full-screen
-        // browser away from its Space. An accessory palette can become key
-        // while the browser remains visually full screen underneath it.
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
+        return behavior
+    }
+
+    private func position(_ panel: FloatingChatPanel) {
+        // Preserve a user-adjusted panel position after its first appearance.
+        guard panel.frame.origin == .zero else { return }
+        let screen = NSScreen.main
+        guard let screen else { return }
+        let visibleFrame = screen.visibleFrame
+        let width = min(760, visibleFrame.width - 40)
+        let height = min(980, visibleFrame.height - 40)
+        panel.setFrame(
+            NSRect(
+                x: visibleFrame.maxX - width - 20,
+                y: visibleFrame.maxY - height - 20,
+                width: width,
+                height: height
+            ),
+            display: true,
+            animate: false
+        )
     }
 
     private func installEventHandler() {
@@ -115,64 +190,6 @@ final class GlobalChatOverlayController: NSObject {
         }
     }
 
-    private func locateFloatingChatWindow() -> NSWindow? {
-        if let floatingChatWindow { return floatingChatWindow }
-        guard let window = NSApp.windows.first(where: {
-            $0.title == FloatingChatWindow.title && $0.contentView != nil
-        }) else {
-            return nil
-        }
-        floatingChatWindow = window
-        return window
-    }
-
-    private func configure(_ window: NSWindow) {
-        // screenSaver is the level macOS composites over a different app's
-        // full-screen Space; statusBar still sits below that shield.
-        window.level = .screenSaver
-        window.hidesOnDeactivate = false
-
-        // AppKit rejects canJoinAllSpaces together with moveToActiveSpace.
-        // On macOS 15+ canJoinAllApplications is the full-screen/Stage
-        // Manager counterpart of canJoinAllSpaces and must not be combined
-        // with fullScreenAuxiliary.
-        var behavior = window.collectionBehavior
-        behavior.remove(.moveToActiveSpace)
-        behavior.remove(.fullScreenPrimary)
-        behavior.remove(.fullScreenAuxiliary)
-        behavior.formUnion([.canJoinAllSpaces, .stationary])
-        if #available(macOS 15.0, *) {
-            behavior.formUnion(.canJoinAllApplications)
-        } else {
-            behavior.formUnion(.fullScreenAuxiliary)
-        }
-        window.collectionBehavior = behavior
-    }
-
-    private func restoreRegularApplicationMode() {
-        guard let activationPolicyBeforeFloatingChat else { return }
-        _ = NSApp.setActivationPolicy(activationPolicyBeforeFloatingChat)
-        self.activationPolicyBeforeFloatingChat = nil
-    }
-
-    private func positionOnFirstPresentation(_ window: NSWindow) {
-        guard !hasPositionedWindow else { return }
-        hasPositionedWindow = true
-
-        let screen = window.screen ?? NSScreen.main
-        guard let screen else { return }
-        let visibleFrame = screen.visibleFrame
-        let width = min(760, visibleFrame.width - 40)
-        let height = min(980, visibleFrame.height - 40)
-        let frame = NSRect(
-            x: visibleFrame.maxX - width - 20,
-            y: visibleFrame.maxY - height - 20,
-            width: width,
-            height: height
-        )
-        window.setFrame(frame, display: true, animate: false)
-    }
-
     private static let hotKeyEventHandler: EventHandlerUPP = { _, event, _ in
         guard let event else { return OSStatus(eventNotHandledErr) }
         var receivedID = EventHotKeyID()
@@ -191,8 +208,6 @@ final class GlobalChatOverlayController: NSObject {
             return OSStatus(eventNotHandledErr)
         }
 
-        // Keep the Carbon callback data-only; SwiftUI's launcher below safely
-        // performs the UI work on MainActor.
         NotificationCenter.default.post(name: .piAppToggleFloatingChat, object: nil)
         return noErr
     }

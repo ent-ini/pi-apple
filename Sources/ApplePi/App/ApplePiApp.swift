@@ -18,9 +18,8 @@ struct ApplePiApp: App {
             ContentView(presentation: .standard)
                 .environmentObject(appState)
                 .frame(minWidth: 260, minHeight: 180)
-                .background(FloatingChatWindowLauncher(appDelegate: appDelegate))
                 .onAppear {
-                    appDelegate.configure(appState: appState)
+                    appDelegate.configure(appState: appState, overlayAppState: overlayAppState)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     appState.shutdownForTermination()
@@ -31,17 +30,6 @@ struct ApplePiApp: App {
             ApplePiCommands(appState: appState)
         }
 
-        Window(FloatingChatWindow.title, id: FloatingChatWindow.id) {
-            ContentView(presentation: .floatingOverlay)
-                .environmentObject(overlayAppState)
-                .frame(minWidth: 520, minHeight: 420)
-                .onAppear {
-                    appDelegate.prepareFloatingChatWindow()
-                }
-                .onDisappear {
-                    appDelegate.floatingChatWindowClosed()
-                }
-        }
 
         Settings {
             SettingsView()
@@ -59,61 +47,11 @@ struct ApplePiApp: App {
     }
 }
 
-enum FloatingChatWindow {
-    static let id = "floating-chat"
-    static let title = "Pi Chat"
-}
-
-private struct FloatingChatWindowLauncher: View {
-    let appDelegate: AppDelegate
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onAppear {
-                appDelegate.configureFloatingChatLauncher(openWindow: openWindow)
-            }
-    }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private weak var appState: PiAppState?
     private var shortcutsObserver: NSObjectProtocol?
     private var floatingChatObserver: NSObjectProtocol?
     private var overlayController: GlobalChatOverlayController?
-    @MainActor private var openFloatingChatWindow: OpenWindowAction?
-
-    @MainActor
-    func configureFloatingChatLauncher(openWindow: OpenWindowAction) {
-        openFloatingChatWindow = openWindow
-    }
-
-    @MainActor
-    func toggleFloatingChat() {
-        let overlayController = overlayController ?? GlobalChatOverlayController()
-        self.overlayController = overlayController
-        if overlayController.isFloatingChatVisible {
-            overlayController.hideFloatingChat()
-            return
-        }
-        guard let openFloatingChatWindow else { return }
-        overlayController.beginFloatingChatPresentation()
-        openFloatingChatWindow(id: FloatingChatWindow.id)
-        DispatchQueue.main.async {
-            overlayController.presentFloatingChat()
-        }
-    }
-
-    @MainActor
-    func prepareFloatingChatWindow() {
-        overlayController?.prepareFloatingChatWindowIfAvailable()
-    }
-
-    @MainActor
-    func floatingChatWindowClosed() {
-        overlayController?.floatingChatWindowClosed()
-    }
 
     deinit {
         if let shortcutsObserver {
@@ -125,9 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @MainActor
-    func configure(appState: PiAppState) {
+    func configure(appState: PiAppState, overlayAppState: PiAppState) {
         self.appState = appState
-        let overlayController = overlayController ?? GlobalChatOverlayController()
+        let overlayController = overlayController ?? GlobalChatOverlayController(overlayAppState: overlayAppState)
         self.overlayController = overlayController
         installShortcutObserverIfNeeded()
         refreshGlobalOverlayShortcut()
@@ -159,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.toggleFloatingChat()
+                self?.overlayController?.toggleFloatingChat()
             }
         }
     }
