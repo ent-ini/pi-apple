@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import ApplePiCore
 
 /// Lightweight Markdown renderer for the mobile chat transcript. It mirrors the
 /// Mac renderer enough for common chat output while keeping the iOS target free
@@ -13,19 +14,25 @@ struct MobileMarkdownText: View {
     }
 
     var body: some View {
-        if usesSingleSelectableText {
-            inlineMarkdownText(text)
-                .font(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Self.cachedBlocks(for: text)) { block in
-                    blockView(block)
+        Group {
+            if usesSingleSelectableText {
+                inlineMarkdownText(text)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Self.cachedBlocks(for: text)) { block in
+                        blockView(block)
+                    }
                 }
+                .textSelection(.enabled)
             }
-            .textSelection(.enabled)
         }
+        .environment(\.openURL, OpenURLAction { url in
+            MarkdownLinkStyling.openExternally(url)
+            return .handled
+        })
     }
 
     private var usesSingleSelectableText: Bool {
@@ -535,10 +542,7 @@ private final class MobileMarkdownInlineCache: @unchecked Sendable {
         if let box = cache.object(forKey: key) {
             return box.attributed
         }
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        guard let attributed = try? AttributedString(markdown: markdown, options: options) else {
+        guard let attributed = MarkdownLinkStyling.parseInline(markdown) else {
             return nil
         }
         cache.setObject(Box(attributed), forKey: key, cost: max(1, markdown.utf8.count))

@@ -15,24 +15,32 @@ struct MarkdownText: View {
     }
 
     var body: some View {
-        if usesSingleSelectableText {
-            // SwiftUI selection is scoped per Text view. Plain multi-paragraph
-            // chat messages used to be split into multiple Text views, so a
-            // drag could only select one block at a time. Render simple
-            // paragraph-only messages as one Text so selection can span the
-            // whole bubble.
-            inlineMarkdownText(text)
-                .font(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Self.cachedBlocks(for: text)) { block in
-                    blockView(block)
+        Group {
+            if usesSingleSelectableText {
+                // SwiftUI selection is scoped per Text view. Plain multi-paragraph
+                // chat messages used to be split into multiple Text views, so a
+                // drag could only select one block at a time. Render simple
+                // paragraph-only messages as one Text so selection can span the
+                // whole bubble.
+                inlineMarkdownText(text)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Self.cachedBlocks(for: text)) { block in
+                        blockView(block)
+                    }
                 }
+                .textSelection(.enabled)
             }
-            .textSelection(.enabled)
         }
+        // Explicit open handler so highlighted links always open in the system
+        // browser, even if an ancestor ever overrides the default openURL.
+        .environment(\.openURL, OpenURLAction { url in
+            MarkdownLinkStyling.openExternally(url)
+            return .handled
+        })
     }
 
     private var usesSingleSelectableText: Bool {
@@ -551,10 +559,7 @@ private final class MarkdownInlineCache: @unchecked Sendable {
         if let box = cache.object(forKey: key) {
             return box.attributed
         }
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        guard let attributed = try? AttributedString(markdown: markdown, options: options) else {
+        guard let attributed = MarkdownLinkStyling.parseInline(markdown) else {
             return nil
         }
         cache.setObject(Box(attributed), forKey: key, cost: max(1, markdown.utf8.count))
