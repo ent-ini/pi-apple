@@ -41,6 +41,10 @@ struct MarkdownText: View {
             MarkdownLinkStyling.openExternally(url)
             return .handled
         })
+        // Reinforce link tinting: link runs already carry an explicit baked-in
+        // color, and this keeps any link SwiftUI decides to style via tint
+        // accent-colored even when a bubble applies its own foregroundStyle.
+        .tint(Color.accentColor)
     }
 
     private var usesSingleSelectableText: Bool {

@@ -33,6 +33,7 @@ struct MobileMarkdownText: View {
             MarkdownLinkStyling.openExternally(url)
             return .handled
         })
+        .tint(Color.accentColor)
     }
 
     private var usesSingleSelectableText: Bool {

@@ -18,7 +18,11 @@ struct MarkdownLinkStylingTests {
         let run = try #require(links.first)
         #expect(run.link?.absoluteString == "https://example.com")
         #expect(String(attributed[run.range].characters) == "docs")
-        #expect(attributed[run.range].foregroundColor != nil)
+        // NB: the explicit NSColor context matters — with both AppKit and
+        // SwiftUI attribute scopes visible, an untyped `.foregroundColor`
+        // read resolves to the SwiftUI scope key and reports nil.
+        let linkColor: NSColor? = attributed[run.range].foregroundColor
+        #expect(linkColor != nil)
         #expect(attributed[run.range].underlineStyle == .single)
     }
 
